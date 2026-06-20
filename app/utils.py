@@ -80,13 +80,16 @@ def detect_anomalies(db):
     alerts = []
 
     result = db.execute("""
-        SELECT r.id, r.task_id, r.paper_id, r.initial_score, r.audit_score,
+        SELECT r_init.paper_id, r_init.initial_score, r_audit.audit_score,
                p.paper_number
-        FROM reviews r
-        JOIN papers p ON r.paper_id = p.id
-        WHERE r.initial_score IS NOT NULL
-          AND r.audit_score IS NOT NULL
-          AND r.final_score IS NULL
+        FROM reviews r_init
+        JOIN reviews r_audit ON r_init.paper_id = r_audit.paper_id
+        JOIN papers p ON r_init.paper_id = p.id
+        WHERE r_init.review_type = 'initial'
+          AND r_audit.review_type = 'audit'
+          AND r_init.initial_score IS NOT NULL
+          AND r_audit.audit_score IS NOT NULL
+          AND r_audit.final_score IS NULL
           AND p.current_status != 'finalized'
     """).fetchall()
     for row in result:
@@ -107,31 +110,52 @@ def detect_anomalies(db):
                 ])
                 alerts.append({'type': 'score_diff', 'paper': row['paper_number']})
 
-    timeout_dt = datetime.now() - timedelta(hours=Config.REVIEW_TIMEOUT_HOURS)
     timeout_tasks = db.execute("""
-        SELECT t.id, t.paper_id, t.assignee_id, t.assigned_at, t.status,
-               p.paper_number, u.real_name
+        SELECT t.id, t.paper_id, t.assignee_id, t.assigned_at, t.status, t.task_type,
+               p.paper_number, u.real_name,
+               rg.review_time_limit_hours, rg.audit_time_limit_hours
         FROM tasks t
         JOIN papers p ON t.paper_id = p.id
         LEFT JOIN users u ON t.assignee_id = u.id
+        LEFT JOIN responsibility_groups rg ON t.group_id = rg.id
         WHERE t.status IN ('reviewing', 'pending_audit')
           AND t.is_active = true
-          AND t.assigned_at < ?
-    """, [timeout_dt]).fetchall()
+    """).fetchall()
     for t in timeout_tasks:
-        existing = db.execute("""
-            SELECT id FROM alerts WHERE alert_type='timeout'
-              AND task_id=? AND is_handled=false
-        """, [t['id']]).fetchone()
-        if not existing:
-            db.execute("""
-                INSERT INTO alerts (alert_type, alert_level, task_id, paper_id, message)
-                VALUES ('timeout', 'critical', ?, ?, ?)
-            """, [
-                t['id'], t['paper_id'],
-                f"任务超时：{t['paper_number']}分配给{t['real_name']}已超过{Config.REVIEW_TIMEOUT_HOURS}小时"
-            ])
-            alerts.append({'type': 'timeout', 'task': t['id']})
+        limit_hours = (
+            float(t['review_time_limit_hours']) if (
+                t['review_time_limit_hours'] is not None
+                and t['status'] == 'reviewing'
+            )
+            else (
+                float(t['audit_time_limit_hours']) if (
+                    t['audit_time_limit_hours'] is not None
+                    and t['status'] == 'pending_audit'
+                )
+                else Config.REVIEW_TIMEOUT_HOURS
+            )
+        )
+        timeout_dt = datetime.now() - timedelta(hours=limit_hours)
+        assigned_at_dt = t['assigned_at']
+        if isinstance(assigned_at_dt, str):
+            try:
+                assigned_at_dt = datetime.fromisoformat(assigned_at_dt)
+            except Exception:
+                assigned_at_dt = datetime.now()
+        if assigned_at_dt and assigned_at_dt < timeout_dt:
+            existing = db.execute("""
+                SELECT id FROM alerts WHERE alert_type='timeout'
+                  AND task_id=? AND is_handled=false
+            """, [t['id']]).fetchone()
+            if not existing:
+                db.execute("""
+                    INSERT INTO alerts (alert_type, alert_level, task_id, paper_id, message)
+                    VALUES ('timeout', 'critical', ?, ?, ?)
+                """, [
+                    t['id'], t['paper_id'],
+                    f"任务超时：{t['paper_number']}分配给{t['real_name']}已超过{limit_hours:.0f}小时"
+                ])
+                alerts.append({'type': 'timeout', 'task': t['id']})
 
     difficulty_cluster = db.execute("""
         SELECT question_group_id, COUNT(*) as cnt,

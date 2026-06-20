@@ -5,7 +5,7 @@ from app.db import get_db
 from app.utils import (
     role_required, get_current_user, row_to_dict, rows_to_list,
     ensure_single_active_task, update_paper_status, check_score_diff,
-    STATUS_MAP
+    STATUS_MAP, detect_anomalies
 )
 
 auditor_bp = Blueprint('auditor', __name__, url_prefix='/api/auditor')
@@ -258,6 +258,7 @@ def submit_audit(task_id):
     elif is_diff:
         update_paper_status(db, task['paper_id'], 'diff_pending')
 
+    detect_anomalies(db)
     db.commit()
 
     result = {
@@ -446,6 +447,7 @@ def resolve_diff(paper_id):
         UPDATE tasks SET status = 'finalized', is_active = false, completed_at = ?
         WHERE paper_id = ? AND task_type = 'audit'
     """, [now, paper_id])
+    detect_anomalies(db)
     db.commit()
 
     return jsonify({

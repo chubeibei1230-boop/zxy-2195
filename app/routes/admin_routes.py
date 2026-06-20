@@ -1,6 +1,7 @@
 from datetime import datetime
 from flask import Blueprint, request, jsonify
 from werkzeug.security import generate_password_hash
+from config import Config
 
 from app.db import get_db
 from app.utils import (
@@ -491,7 +492,8 @@ def create_responsibility_group():
     description = data.get('description', '')
     batch_id = data.get('batch_id')
     question_group_id = data.get('question_group_id')
-    deadline_hours = data.get('deadline_hours', 48)
+    review_time_limit_hours = data.get('review_time_limit_hours', data.get('deadline_hours', 48))
+    audit_time_limit_hours = data.get('audit_time_limit_hours', data.get('deadline_hours', 24))
 
     if not group_code or not group_name:
         return jsonify({"error": "责任组编号和名称必填"}), 400
@@ -502,9 +504,9 @@ def create_responsibility_group():
         return jsonify({"error": "责任组编号已存在"}), 400
 
     cursor = db.execute("""
-        INSERT INTO responsibility_groups (group_code, group_name, description, batch_id, question_group_id, deadline_hours)
-        VALUES (?, ?, ?, ?, ?, ?) RETURNING id
-    """, [group_code, group_name, description, batch_id, question_group_id, deadline_hours])
+        INSERT INTO responsibility_groups (group_code, group_name, description, batch_id, question_group_id, review_time_limit_hours, audit_time_limit_hours)
+        VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id
+    """, [group_code, group_name, description, batch_id, question_group_id, review_time_limit_hours, audit_time_limit_hours])
     new_id = cursor.fetchval()
     db.commit()
 
@@ -522,10 +524,20 @@ def update_responsibility_group(rg_id):
 
     fields = []
     params = []
-    for k in ('group_name', 'description', 'batch_id', 'question_group_id', 'deadline_hours'):
+    allowed = ('group_name', 'description', 'batch_id', 'question_group_id',
+               'review_time_limit_hours', 'audit_time_limit_hours', 'deadline_hours')
+    for k in allowed:
         if k in data:
-            fields.append(f"{k} = ?")
-            params.append(data[k])
+            if k == 'deadline_hours':
+                if 'review_time_limit_hours' not in data:
+                    fields.append("review_time_limit_hours = ?")
+                    params.append(data[k])
+                if 'audit_time_limit_hours' not in data:
+                    fields.append("audit_time_limit_hours = ?")
+                    params.append(data[k])
+            else:
+                fields.append(f"{k} = ?")
+                params.append(data[k])
     if fields:
         params.append(rg_id)
         db.execute(f"UPDATE responsibility_groups SET {', '.join(fields)} WHERE id = ?", params)
@@ -579,14 +591,21 @@ def assign_task():
         final_group_id = group_id
         if not final_group_id:
             rg = db.execute("""
-                SELECT id, deadline_hours FROM responsibility_groups
+                SELECT id, review_time_limit_hours, audit_time_limit_hours
+                FROM responsibility_groups
                 WHERE question_group_id = ? AND (batch_id = (SELECT batch_id FROM papers WHERE id = ?) OR batch_id IS NULL)
                 LIMIT 1
             """, [paper['question_group_id'], pid]).fetchone()
             if rg:
                 final_group_id = rg['id']
 
-        deadline_hours = rg['deadline_hours'] if rg else 48
+        if rg:
+            deadline_hours = (
+                float(rg['review_time_limit_hours']) if task_type == 'review'
+                else float(rg['audit_time_limit_hours'])
+            )
+        else:
+            deadline_hours = Config.REVIEW_TIMEOUT_HOURS if task_type == 'review' else 24
         deadline = calculate_deadline(deadline_hours)
 
         new_status = 'reviewing' if task_type == 'review' else 'pending_audit'
@@ -650,12 +669,30 @@ def batch_auto_assign():
         if active_task:
             continue
 
+        rg = db.execute("""
+            SELECT id, review_time_limit_hours, audit_time_limit_hours
+            FROM responsibility_groups
+            WHERE question_group_id = ? AND (batch_id = ? OR batch_id IS NULL)
+            ORDER BY batch_id DESC NULLS LAST LIMIT 1
+        """, [p['question_group_id'], batch_id]).fetchone()
+
+        if rg:
+            rg_id = rg['id']
+            deadline_hours = (
+                float(rg['review_time_limit_hours']) if task_type == 'review'
+                else float(rg['audit_time_limit_hours'])
+            )
+        else:
+            rg_id = None
+            deadline_hours = Config.REVIEW_TIMEOUT_HOURS if task_type == 'review' else 24
+        deadline = calculate_deadline(deadline_hours)
+
         new_status = 'reviewing' if task_type == 'review' else 'pending_audit'
         task_code = generate_task_code(task_type)
         cursor = db.execute("""
-            INSERT INTO tasks (task_code, paper_id, task_type, assignee_id, status, assigned_at, deadline_at, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, true) RETURNING id
-        """, [task_code, p['id'], task_type, assignee_id, new_status, now, calculate_deadline(48)])
+            INSERT INTO tasks (task_code, paper_id, task_type, assignee_id, group_id, status, assigned_at, deadline_at, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, true) RETURNING id
+        """, [task_code, p['id'], task_type, assignee_id, rg_id, new_status, now, deadline])
         task_id = cursor.fetchval()
 
         if task_type == 'review':
@@ -672,7 +709,7 @@ def batch_auto_assign():
     return jsonify({
         "assigned": assigned_count,
         "total_papers": len(papers),
-        "message": f"自动分配{assigned_count}份试卷"
+        "message": f"自动分配{assigned_count}份试卷, 分配{assigned_count}/{len(papers)}份"
     }), 200
 
 
@@ -743,16 +780,28 @@ def list_tasks():
 def update_task_status(task_id):
     data = request.get_json()
     new_status = data.get('status')
-    if new_status not in STATUS_MAP and new_status != 'returned':
+    if new_status not in STATUS_MAP and new_status not in ('returned', 'suspended'):
         return jsonify({"error": "无效状态"}), 400
 
     db = get_db()
-    task = db.execute("SELECT id, paper_id, task_type FROM tasks WHERE id = ?", [task_id]).fetchone()
+    task = db.execute("SELECT id, paper_id, task_type, status FROM tasks WHERE id = ?", [task_id]).fetchone()
     if not task:
         return jsonify({"error": "任务不存在"}), 404
 
     db.execute("UPDATE tasks SET status = ? WHERE id = ?", [new_status, task_id])
-    update_paper_status(db, task['paper_id'], new_status if new_status in STATUS_MAP else task['status'])
+
+    if new_status in STATUS_MAP:
+        update_paper_status(db, task['paper_id'], new_status)
+    elif new_status == 'returned':
+        db.execute("UPDATE tasks SET is_active = false WHERE id = ?", [task_id])
+        back_to = 'pending_assignment' if task['task_type'] == 'review' else 'pending_audit'
+        other_active = db.execute("""
+            SELECT 1 FROM tasks
+            WHERE paper_id = ? AND task_type = ? AND is_active = true AND id != ?
+            LIMIT 1
+        """, [task['paper_id'], task['task_type'], task_id]).fetchone()
+        if not other_active:
+            update_paper_status(db, task['paper_id'], back_to)
     db.commit()
 
     return jsonify({"message": "任务状态更新成功"}), 200

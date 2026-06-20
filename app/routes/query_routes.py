@@ -314,36 +314,38 @@ def pending_audit_list():
     question_group_id = request.args.get('question_group_id', type=int)
     sort_by = request.args.get('sort_by', 'deadline')
 
-    base_query = """
-        FROM tasks t
-        LEFT JOIN papers p ON t.paper_id = p.id
-        LEFT JOIN batches b ON p.batch_id = b.id
-        LEFT JOIN question_groups qg ON p.question_group_id = qg.id
-        LEFT JOIN users u ON t.assignee_id = u.id
-        WHERE t.task_type = 'audit'
-          AND t.status IN ('pending_audit', 'diff_pending')
-          AND t.is_active = true
+    base_where = """
+        WHERE p.current_status IN ('pending_audit', 'diff_pending')
     """
     params = []
 
     if batch_id:
-        base_query += " AND p.batch_id = ?"
+        base_where += " AND p.batch_id = ?"
         params.append(batch_id)
     if question_group_id:
-        base_query += " AND p.question_group_id = ?"
+        base_where += " AND p.question_group_id = ?"
         params.append(question_group_id)
 
-    count = db.execute(f"SELECT COUNT(*) {base_query}", params).fetchval()
+    count_sql = f"""
+        SELECT COUNT(*)
+        FROM papers p
+        LEFT JOIN batches b ON p.batch_id = b.id
+        LEFT JOIN question_groups qg ON p.question_group_id = qg.id
+        {base_where}
+    """
+    count = db.execute(count_sql, params).fetchval()
 
     order_sql = "t.deadline_at ASC NULLS LAST"
     if sort_by == 'assigned':
         order_sql = "t.assigned_at ASC NULLS FIRST"
     elif sort_by == 'status':
-        order_sql = "CASE WHEN t.status = 'diff_pending' THEN 0 ELSE 1 END, t.deadline_at ASC NULLS LAST"
+        order_sql = "CASE WHEN p.current_status = 'diff_pending' THEN 0 ELSE 1 END, t.deadline_at ASC NULLS LAST"
 
     query = f"""
         SELECT
-            t.id as task_id, t.task_code, t.status, t.assigned_at, t.started_at, t.deadline_at,
+            t.id as task_id, t.task_code,
+            CASE WHEN t.id IS NOT NULL THEN t.status ELSE p.current_status END as status,
+            t.assigned_at, t.started_at, t.deadline_at,
             p.id as paper_id, p.paper_number, p.candidate_name, p.candidate_id,
             b.batch_name, qg.group_name as question_group_name, qg.max_score,
             u.real_name as assignee_name,
@@ -352,8 +354,18 @@ def pending_audit_list():
                  WHEN t.deadline_at IS NOT NULL AND t.deadline_at < (LOCALTIMESTAMP + INTERVAL 4 HOUR)
                  THEN 'urgent'
                  ELSE 'normal'
-            END as urgency
-        {base_query}
+            END as urgency,
+            p.current_status as paper_status
+        FROM papers p
+        LEFT JOIN batches b ON p.batch_id = b.id
+        LEFT JOIN question_groups qg ON p.question_group_id = qg.id
+        LEFT JOIN LATERAL (
+            SELECT t0.* FROM tasks t0
+            WHERE t0.paper_id = p.id AND t0.task_type = 'audit' AND t0.is_active = true
+            ORDER BY t0.id DESC LIMIT 1
+        ) t ON true
+        LEFT JOIN users u ON t.assignee_id = u.id
+        {base_where}
         ORDER BY {order_sql}
         LIMIT ? OFFSET ?
     """
@@ -363,7 +375,8 @@ def pending_audit_list():
     result = []
     for r in rows:
         d = dict(r)
-        d['status_name'] = STATUS_MAP.get(d['status'], d['status'])
+        status_val = d['status']
+        d['status_name'] = STATUS_MAP.get(status_val, status_val)
 
         init_r = db.execute("""
             SELECT initial_score, difficulty_flag, completion_note,
@@ -377,21 +390,40 @@ def pending_audit_list():
             d['initial_review'] = dict(init_r)
             d['initial_score'] = init_r['initial_score']
 
-        if d['deadline_at']:
-            deadline_dt = datetime.fromisoformat(str(d['deadline_at'])) if isinstance(d['deadline_at'], str) else d['deadline_at']
+        deadline_val = d.get('deadline_at')
+        if deadline_val:
+            if isinstance(deadline_val, str):
+                deadline_dt = datetime.fromisoformat(deadline_val)
+            else:
+                deadline_dt = deadline_val
             d['hours_remaining'] = round((deadline_dt - datetime.now()).total_seconds() / 3600, 1)
 
         result.append(d)
 
+    urgency_params = []
+    urgency_where = "WHERE p.current_status IN ('pending_audit', 'diff_pending')"
+    if batch_id:
+        urgency_where += " AND p.batch_id = ?"
+        urgency_params.append(batch_id)
+    if question_group_id:
+        urgency_where += " AND p.question_group_id = ?"
+        urgency_params.append(question_group_id)
+
     urgency_count = db.execute(f"""
         SELECT
-            SUM(CASE WHEN t.status = 'diff_pending' THEN 1 ELSE 0 END) as diff_pending_count,
-            SUM(CASE WHEN t.deadline_at IS NOT NULL AND t.deadline_at < LOCALTIMESTAMP THEN 1 ELSE 0 END) as timeout_count,
-            SUM(CASE WHEN t.deadline_at IS NOT NULL AND t.deadline_at >= LOCALTIMESTAMP
-                      AND t.deadline_at < (LOCALTIMESTAMP + INTERVAL 4 HOUR) THEN 1 ELSE 0 END) as urgent_count,
-            SUM(CASE WHEN t.assignee_id IS NULL THEN 1 ELSE 0 END) as unassigned_count
-        {base_query}
-    """, params[:-2]).fetchone()
+            COALESCE(SUM(CASE WHEN p.current_status = 'diff_pending' THEN 1 ELSE 0 END), 0) as diff_pending_count,
+            COALESCE(SUM(CASE WHEN t.deadline_at IS NOT NULL AND t.deadline_at < LOCALTIMESTAMP THEN 1 ELSE 0 END), 0) as timeout_count,
+            COALESCE(SUM(CASE WHEN t.deadline_at IS NOT NULL AND t.deadline_at >= LOCALTIMESTAMP
+                      AND t.deadline_at < (LOCALTIMESTAMP + INTERVAL 4 HOUR) THEN 1 ELSE 0 END), 0) as urgent_count,
+            COALESCE(SUM(CASE WHEN t.assignee_id IS NULL THEN 1 ELSE 0 END), 0) as unassigned_count
+        FROM papers p
+        LEFT JOIN LATERAL (
+            SELECT t0.* FROM tasks t0
+            WHERE t0.paper_id = p.id AND t0.task_type = 'audit' AND t0.is_active = true
+            ORDER BY t0.id DESC LIMIT 1
+        ) t ON true
+        {urgency_where}
+    """, urgency_params).fetchone()
 
     return jsonify({
         "total": count,
@@ -543,6 +575,10 @@ def statistics_summary():
           AND ra.final_score IS NOT NULL
     """, params).fetchone()
 
+    workload_params = list(params)
+    workload_where = 'WHERE 1=1'
+    if batch_id:
+        workload_where += ' AND EXISTS (SELECT 1 FROM papers pp WHERE pp.id = t.paper_id AND pp.batch_id = ?)'
     workload = db.execute(f"""
         SELECT
             u.id, u.real_name, u.username, u.role,
@@ -552,11 +588,11 @@ def statistics_summary():
             SUM(CASE WHEN t.status IN ('reviewing', 'pending_audit', 'diff_pending') THEN 1 ELSE 0 END) as in_progress_tasks
         FROM users u
         LEFT JOIN tasks t ON t.assignee_id = u.id
-        {('WHERE 1=1' + (' AND EXISTS (SELECT 1 FROM papers pp WHERE pp.id = t.paper_id AND pp.batch_id = ?)' if batch_id else '')) if params else ''}
+        {workload_where}
         GROUP BY u.id, u.real_name, u.username, u.role
         HAVING (review_tasks + audit_tasks) > 0
         ORDER BY completed_tasks DESC
-    """, params).fetchall()
+    """, workload_params).fetchall()
 
     return jsonify({
         "paper_status_distribution": dict(papers_total),

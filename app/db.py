@@ -220,7 +220,8 @@ def init_db(app):
                 description TEXT,
                 batch_id INTEGER,
                 question_group_id INTEGER,
-                deadline_hours INTEGER DEFAULT 48,
+                review_time_limit_hours INTEGER DEFAULT 48,
+                audit_time_limit_hours INTEGER DEFAULT 24,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)

@@ -4,7 +4,8 @@ from flask import Blueprint, request, jsonify
 from app.db import get_db
 from app.utils import (
     role_required, get_current_user, row_to_dict, rows_to_list,
-    ensure_single_active_task, update_paper_status, STATUS_MAP
+    ensure_single_active_task, update_paper_status, STATUS_MAP,
+    detect_anomalies
 )
 
 reviewer_bp = Blueprint('reviewer', __name__, url_prefix='/api/reviewer')
@@ -189,9 +190,10 @@ def submit_review(task_id):
         """, [task_id, task['paper_id'], user['id'], initial_score, deduction_reason, difficulty_flag, difficulty_note, completion_note])
 
     db.execute("""
-        UPDATE tasks SET status = 'pending_audit', completed_at = ? WHERE id = ?
+        UPDATE tasks SET status = 'pending_audit', completed_at = ?, is_active = false WHERE id = ?
     """, [now, task_id])
     update_paper_status(db, task['paper_id'], 'pending_audit')
+    detect_anomalies(db)
     db.commit()
 
     return jsonify({
