@@ -790,9 +790,7 @@ def update_task_status(task_id):
 
     db.execute("UPDATE tasks SET status = ? WHERE id = ?", [new_status, task_id])
 
-    if new_status in STATUS_MAP:
-        update_paper_status(db, task['paper_id'], new_status)
-    elif new_status == 'returned':
+    if new_status == 'returned':
         db.execute("UPDATE tasks SET is_active = false WHERE id = ?", [task_id])
         back_to = 'pending_assignment' if task['task_type'] == 'review' else 'pending_audit'
         other_active = db.execute("""
@@ -802,6 +800,8 @@ def update_task_status(task_id):
         """, [task['paper_id'], task['task_type'], task_id]).fetchone()
         if not other_active:
             update_paper_status(db, task['paper_id'], back_to)
+    elif new_status in STATUS_MAP:
+        update_paper_status(db, task['paper_id'], new_status)
     db.commit()
 
     return jsonify({"message": "任务状态更新成功"}), 200
