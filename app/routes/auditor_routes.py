@@ -138,7 +138,7 @@ def accept_task(task_id):
     db = get_db()
 
     task = db.execute("""
-        SELECT id, paper_id, status, assignee_id, is_active
+        SELECT id, paper_id, status, assignee_id, is_active, review_round
         FROM tasks WHERE id = ? AND task_type = 'audit'
     """, [task_id]).fetchone()
 
@@ -161,10 +161,12 @@ def accept_task(task_id):
         SELECT id FROM reviews WHERE task_id = ? AND review_type = 'audit'
     """, [task_id]).fetchone()
     if not existing:
+        paper = db.execute("SELECT current_round FROM papers WHERE id = ?", [task['paper_id']]).fetchone()
+        audit_round = task['review_round'] or (paper['current_round'] if paper else 1) or 1
         db.execute("""
-            INSERT INTO reviews (task_id, paper_id, reviewer_id, review_type)
-            VALUES (?, ?, ?, 'audit')
-        """, [task_id, task['paper_id'], user['id']])
+            INSERT INTO reviews (task_id, paper_id, reviewer_id, review_type, review_round)
+            VALUES (?, ?, ?, 'audit', ?)
+        """, [task_id, task['paper_id'], user['id'], audit_round])
 
     update_paper_status(db, task['paper_id'], 'pending_audit')
     db.commit()
@@ -264,6 +266,14 @@ def submit_audit(task_id):
     if new_status == 'finalized':
         update_paper_status(db, task['paper_id'], 'finalized')
         db.execute("UPDATE tasks SET is_active = false WHERE paper_id = ?", [task['paper_id']])
+        db.execute("""
+            UPDATE review_return_records 
+            SET status = 'closed', closed_at = ?, updated_at = ?
+            WHERE paper_id = ? AND status IN ('pending', 'reevaluating', 'reevaluated')
+              AND id = (SELECT id FROM review_return_records 
+                        WHERE paper_id = ? 
+                        ORDER BY id DESC LIMIT 1)
+        """, [now, now, task['paper_id'], task['paper_id']])
     elif is_diff:
         update_paper_status(db, task['paper_id'], 'diff_pending')
 
@@ -456,6 +466,14 @@ def resolve_diff(paper_id):
         UPDATE tasks SET status = 'finalized', is_active = false, completed_at = ?
         WHERE paper_id = ? AND task_type = 'audit'
     """, [now, paper_id])
+    db.execute("""
+        UPDATE review_return_records 
+        SET status = 'closed', closed_at = ?, updated_at = ?
+        WHERE paper_id = ? AND status IN ('pending', 'reevaluating', 'reevaluated')
+          AND id = (SELECT id FROM review_return_records 
+                    WHERE paper_id = ? 
+                    ORDER BY id DESC LIMIT 1)
+    """, [now, now, paper_id, paper_id])
     detect_anomalies(db)
     db.commit()
 
@@ -509,6 +527,7 @@ def return_for_reeval(task_id):
     now = datetime.now()
     return_code = generate_return_code()
     return_round = (paper['return_count'] or 0) + 1
+    new_review_round = (paper['current_round'] or 1) + 1
 
     cursor = db.execute("""
         INSERT INTO review_return_records (
@@ -533,7 +552,7 @@ def return_for_reeval(task_id):
             latest_return_reason = ?,
             latest_return_reason_type = ?
         WHERE id = ?
-    """, [return_round, return_round, return_reason, return_reason_type, task['paper_id']])
+    """, [new_review_round, return_round, return_reason, return_reason_type, task['paper_id']])
 
     rg = db.execute("""
         SELECT id, review_time_limit_hours
@@ -582,14 +601,14 @@ def return_for_reeval(task_id):
         ) VALUES (?, ?, 'review', ?, ?, 'pending_reeval', ?, ?, true, ?, ?)
         RETURNING id
     """, [task_code, task['paper_id'], assignee_id, final_group_id,
-          now, deadline, return_round, return_id])
+          now, deadline, new_review_round, return_id])
     new_task_id = task_cursor.fetchval()
 
     if assignee_id:
         db.execute("""
             INSERT INTO reviews (task_id, paper_id, reviewer_id, review_type, review_round)
             VALUES (?, ?, ?, 'initial', ?)
-        """, [new_task_id, task['paper_id'], assignee_id, return_round])
+        """, [new_task_id, task['paper_id'], assignee_id, new_review_round])
 
     db.execute("""
         UPDATE review_return_records SET reeval_task_id = ?, status = 'reevaluating', updated_at = ?

@@ -629,7 +629,7 @@ def assign_task():
     now = datetime.now()
 
     for pid in paper_ids:
-        paper = db.execute("SELECT id, current_status, question_group_id FROM papers WHERE id = ?", [pid]).fetchone()
+        paper = db.execute("SELECT id, current_status, question_group_id, current_round FROM papers WHERE id = ?", [pid]).fetchone()
         if not paper:
             skipped.append({"paper_id": pid, "reason": "试卷不存在"})
             continue
@@ -665,18 +665,25 @@ def assign_task():
             skipped.append({"paper_id": pid, "reason": f"当前状态{paper['current_status']}不允许分配复核"})
             continue
 
+        review_round = paper['current_round'] if paper['current_round'] else 1
+
         task_code = generate_task_code(task_type)
         cursor = db.execute("""
-            INSERT INTO tasks (task_code, paper_id, task_type, assignee_id, group_id, status, assigned_at, deadline_at, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, true) RETURNING id
-        """, [task_code, pid, task_type, assignee_id, final_group_id, new_status, now, deadline])
+            INSERT INTO tasks (task_code, paper_id, task_type, assignee_id, group_id, status, assigned_at, deadline_at, is_active, review_round)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
+        """, [task_code, pid, task_type, assignee_id, final_group_id, new_status, now, deadline, True, review_round])
         task_id = cursor.fetchval()
 
         if task_type == 'review':
             db.execute("""
-                INSERT INTO reviews (task_id, paper_id, reviewer_id, review_type)
-                VALUES (?, ?, ?, 'initial')
-            """, [task_id, pid, assignee_id])
+                INSERT INTO reviews (task_id, paper_id, reviewer_id, review_type, review_round)
+                VALUES (?, ?, ?, 'initial', ?)
+            """, [task_id, pid, assignee_id, paper['current_round']])
+        elif task_type == 'audit':
+            db.execute("""
+                INSERT INTO reviews (task_id, paper_id, reviewer_id, review_type, review_round)
+                VALUES (?, ?, ?, 'audit', ?)
+            """, [task_id, pid, assignee_id, paper['current_round']])
 
         update_paper_status(db, pid, new_status)
         assigned_count += 1
@@ -706,7 +713,7 @@ def batch_auto_assign():
 
     status_cond = "current_status = 'pending_assignment'" if task_type == 'review' else "current_status = 'pending_audit'"
     papers = db.execute(f"""
-        SELECT id, question_group_id FROM papers
+        SELECT id, question_group_id, current_round FROM papers
         WHERE batch_id = ? AND {status_cond}
     """, [batch_id]).fetchall()
 
@@ -740,18 +747,24 @@ def batch_auto_assign():
         deadline = calculate_deadline(deadline_hours)
 
         new_status = 'reviewing' if task_type == 'review' else 'pending_audit'
+        review_round = p['current_round'] if p['current_round'] else 1
         task_code = generate_task_code(task_type)
         cursor = db.execute("""
-            INSERT INTO tasks (task_code, paper_id, task_type, assignee_id, group_id, status, assigned_at, deadline_at, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, true) RETURNING id
-        """, [task_code, p['id'], task_type, assignee_id, rg_id, new_status, now, deadline])
+            INSERT INTO tasks (task_code, paper_id, task_type, assignee_id, group_id, status, assigned_at, deadline_at, is_active, review_round)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
+        """, [task_code, p['id'], task_type, assignee_id, rg_id, new_status, now, deadline, True, review_round])
         task_id = cursor.fetchval()
 
         if task_type == 'review':
             db.execute("""
-                INSERT INTO reviews (task_id, paper_id, reviewer_id, review_type)
-                VALUES (?, ?, ?, 'initial')
-            """, [task_id, p['id'], assignee_id])
+                INSERT INTO reviews (task_id, paper_id, reviewer_id, review_type, review_round)
+                VALUES (?, ?, ?, 'initial', ?)
+            """, [task_id, p['id'], assignee_id, review_round])
+        elif task_type == 'audit':
+            db.execute("""
+                INSERT INTO reviews (task_id, paper_id, reviewer_id, review_type, review_round)
+                VALUES (?, ?, ?, 'audit', ?)
+            """, [task_id, p['id'], assignee_id, review_round])
 
         update_paper_status(db, p['id'], new_status)
         assigned_count += 1

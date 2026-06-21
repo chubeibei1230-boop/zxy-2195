@@ -43,8 +43,8 @@ def create_return():
     if not paper:
         return jsonify({"error": "试卷不存在"}), 404
 
-    if paper['current_status'] not in ('pending_audit', 'diff_pending', 'reviewing'):
-        return jsonify({"error": "试卷当前状态不允许发起退回重评，仅待复核、差异待处理、阅卷中状态可退回"}), 400
+    if paper['current_status'] not in ('pending_audit', 'diff_pending'):
+        return jsonify({"error": "试卷当前状态不允许发起退回重评，仅待复核、差异待处理状态可退回"}), 400
 
     if task_id:
         task = db.execute("""
@@ -59,6 +59,7 @@ def create_return():
     now = datetime.now()
     return_code = generate_return_code()
     return_round = (paper['return_count'] or 0) + 1
+    new_review_round = (paper['current_round'] or 1) + 1
 
     cursor = db.execute("""
         INSERT INTO review_return_records (
@@ -83,7 +84,7 @@ def create_return():
             latest_return_reason = ?,
             latest_return_reason_type = ?
         WHERE id = ?
-    """, [return_round, return_round, return_reason, return_reason_type, paper_id])
+    """, [new_review_round, return_round, return_reason, return_reason_type, paper_id])
 
     paper_info = db.execute("""
         SELECT p.question_group_id FROM papers p WHERE p.id = ?
@@ -137,14 +138,14 @@ def create_return():
         ) VALUES (?, ?, 'review', ?, ?, 'pending_reeval', ?, ?, true, ?, ?)
         RETURNING id
     """, [task_code, paper_id, assignee_id, final_group_id,
-          now, deadline, return_round, return_id])
+          now, deadline, new_review_round, return_id])
     new_task_id = task_cursor.fetchval()
 
     if assignee_id:
         db.execute("""
             INSERT INTO reviews (task_id, paper_id, reviewer_id, review_type, review_round)
             VALUES (?, ?, ?, 'initial', ?)
-        """, [new_task_id, paper_id, assignee_id, return_round])
+        """, [new_task_id, paper_id, assignee_id, new_review_round])
 
     db.execute("""
         UPDATE review_return_records SET reeval_task_id = ?, status = 'reevaluating', updated_at = ?

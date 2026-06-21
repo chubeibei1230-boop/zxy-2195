@@ -209,6 +209,7 @@ def query_tasks():
 
     batch_id = request.args.get('batch_id', type=int)
     question_group_id = request.args.get('question_group_id', type=int)
+    paper_id = request.args.get('paper_id', type=int)
     status = request.args.get('status')
     task_type = request.args.get('task_type')
     assignee_id = request.args.get('assignee_id', type=int)
@@ -233,6 +234,9 @@ def query_tasks():
     if question_group_id:
         base_query += " AND p.question_group_id = ?"
         params.append(question_group_id)
+    if paper_id:
+        base_query += " AND t.paper_id = ?"
+        params.append(paper_id)
     if status:
         base_query += " AND t.status = ?"
         params.append(status)
