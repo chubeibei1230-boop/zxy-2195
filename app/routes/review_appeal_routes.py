@@ -7,7 +7,7 @@ from app.utils import (
     add_appeal_log, get_paper_latest_appeal,
     APPEAL_STATUS_MAP, APPEAL_TYPE_MAP, APPEAL_PRIORITY_MAP,
     STATUS_MAP, ROLE_MAP, update_paper_status, ensure_single_active_task,
-    generate_task_code, calculate_deadline
+    generate_task_code, calculate_deadline, detect_anomalies
 )
 from config import Config
 
@@ -195,15 +195,15 @@ def get_appeal_detail(appeal_id):
 @appeal_bp.route('', methods=['POST'])
 @role_required('admin')
 def create_appeal():
-    data = request.get_json()
+    data = request.get_json(force=True, silent=True) or {}
     user = get_current_user()
     db = get_db()
 
     paper_id = data.get('paper_id')
     appeal_type = data.get('appeal_type')
-    priority = data.get('priority', 'medium')
-    reason = data.get('reason', '').strip()
-    description = data.get('description', '')
+    priority = data.get('priority') or 'medium'
+    reason = (data.get('reason') or '').strip()
+    description = data.get('description') or ''
 
     if not paper_id or not appeal_type or not reason:
         return jsonify({"error": "试卷ID、申请类型、申请原因为必填项"}), 400
@@ -214,7 +214,7 @@ def create_appeal():
         return jsonify({"error": "无效的优先级"}), 400
 
     paper = db.execute("""
-        SELECT id, current_status, is_reviewing, current_appeal_id, appeal_count
+        SELECT id, paper_number, current_status, is_reviewing, current_appeal_id, appeal_count
         FROM papers WHERE id = ?
     """, [paper_id]).fetchone()
 
@@ -246,6 +246,18 @@ def create_appeal():
         WHERE id = ?
     """, [appeal_id, paper_id])
 
+    priority_level = 'critical' if priority == 'high' else ('warning' if priority == 'medium' else 'info')
+    appeal_type_name = APPEAL_TYPE_MAP.get(appeal_type, appeal_type)
+    db.execute("""
+        INSERT INTO alerts (alert_type, alert_level, paper_id, message, detail_json)
+        VALUES ('review_appeal', ?, ?, ?, ?)
+    """, [
+        priority_level,
+        paper_id,
+        f"复评申请：试卷{paper['paper_number'] if paper.get('paper_number') else paper_id}，类型：{appeal_type_name}，优先级：{APPEAL_PRIORITY_MAP.get(priority, priority)}",
+        f'{{"appeal_id": {appeal_id}, "appeal_code": "{appeal_code}", "appeal_type": "{appeal_type}", "priority": "{priority}"}}'
+    ])
+
     db.commit()
 
     return jsonify({
@@ -258,10 +270,10 @@ def create_appeal():
 @appeal_bp.route('/<int:appeal_id>/accept', methods=['POST'])
 @role_required('admin')
 def accept_appeal(appeal_id):
-    data = request.get_json() or {}
+    data = request.get_json(force=True, silent=True) or {}
     user = get_current_user()
     db = get_db()
-    remark = data.get('remark', '')
+    remark = data.get('remark') or ''
 
     appeal = db.execute("""
         SELECT id, status, paper_id FROM review_appeals WHERE id = ?
@@ -288,10 +300,10 @@ def accept_appeal(appeal_id):
 @appeal_bp.route('/<int:appeal_id>/start', methods=['POST'])
 @role_required('admin')
 def start_review(appeal_id):
-    data = request.get_json() or {}
+    data = request.get_json(force=True, silent=True) or {}
     user = get_current_user()
     db = get_db()
-    remark = data.get('remark', '')
+    remark = data.get('remark') or ''
     assignee_id = data.get('assignee_id')
     task_type = data.get('task_type', 'audit')
     group_id = data.get('group_id')
@@ -316,7 +328,7 @@ def start_review(appeal_id):
     if not assignee_id:
         assignee_id = user['id']
 
-    assignee = db.execute("SELECT id, role, group_id FROM users WHERE id = ? AND is_active = true", [assignee_id]).fetchone()
+    assignee = db.execute("SELECT id, role, group_id, real_name, username FROM users WHERE id = ? AND is_active = true", [assignee_id]).fetchone()
     if not assignee:
         return jsonify({"error": "处理人不存在或已禁用"}), 400
 
@@ -387,7 +399,7 @@ def start_review(appeal_id):
     """, [user['id'], now, now, appeal_id])
 
     add_appeal_log(db, appeal_id, user['id'], 'start',
-                   remark if remark else f"分配{task_type}任务给{assignee.get('real_name', assignee['username'])}",
+                   remark or f"分配{task_type}任务给{assignee['real_name'] or assignee['username']}",
                    appeal['status'], 'reviewing')
 
     db.commit()
@@ -402,11 +414,11 @@ def start_review(appeal_id):
 @appeal_bp.route('/<int:appeal_id>/complete', methods=['POST'])
 @role_required('admin')
 def complete_appeal(appeal_id):
-    data = request.get_json()
+    data = request.get_json(force=True, silent=True) or {}
     user = get_current_user()
     db = get_db()
 
-    conclusion = data.get('conclusion', '').strip()
+    conclusion = (data.get('conclusion') or '').strip()
     final_score = data.get('final_score')
 
     if not conclusion:
@@ -421,6 +433,19 @@ def complete_appeal(appeal_id):
 
     if appeal['status'] != 'reviewing':
         return jsonify({"error": "只有复评中状态的申请可以完成"}), 400
+
+    review_tasks = db.execute("""
+        SELECT id, status, task_code FROM tasks
+        WHERE paper_id = ? AND is_review_task = true AND appeal_id = ? AND is_active = true
+    """, [appeal['paper_id'], appeal_id]).fetchall()
+
+    incomplete_tasks = [t for t in review_tasks if t['status'] not in ('finalized', 'diff_pending')]
+    if incomplete_tasks:
+        task_info = ', '.join([f"{t['task_code']}({STATUS_MAP.get(t['status'], t['status'])})" for t in incomplete_tasks])
+        return jsonify({
+            "error": f"复评任务尚未完成，无法结案。未完成任务：{task_info}",
+            "incomplete_tasks": [{"id": t['id'], "task_code": t['task_code'], "status": t['status']} for t in incomplete_tasks]
+        }), 400
 
     now = datetime.now()
 
@@ -439,7 +464,7 @@ def complete_appeal(appeal_id):
     add_appeal_log(db, appeal_id, user['id'], 'complete', conclusion, 'reviewing', 'completed')
 
     db.execute("""
-        UPDATE papers SET is_reviewing = false, current_appeal_id = NULL
+        UPDATE papers SET is_reviewing = false
         WHERE id = ?
     """, [appeal['paper_id']])
 
@@ -468,11 +493,11 @@ def complete_appeal(appeal_id):
 @appeal_bp.route('/<int:appeal_id>/reject', methods=['POST'])
 @role_required('admin')
 def reject_appeal(appeal_id):
-    data = request.get_json()
+    data = request.get_json(force=True, silent=True) or {}
     user = get_current_user()
     db = get_db()
 
-    reason = data.get('reason', '').strip()
+    reason = (data.get('reason') or '').strip()
     if not reason:
         return jsonify({"error": "驳回原因为必填项"}), 400
 
@@ -497,7 +522,7 @@ def reject_appeal(appeal_id):
     add_appeal_log(db, appeal_id, user['id'], 'reject', reason, appeal['status'], 'rejected')
 
     db.execute("""
-        UPDATE papers SET is_reviewing = false, current_appeal_id = NULL
+        UPDATE papers SET is_reviewing = false
         WHERE id = ?
     """, [appeal['paper_id']])
 

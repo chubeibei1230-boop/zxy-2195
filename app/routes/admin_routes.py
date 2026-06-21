@@ -303,6 +303,24 @@ def list_papers():
             d['appeal_status_name'] = APPEAL_STATUS_MAP.get(d['appeal_status'], d['appeal_status'])
         if d.get('appeal_type'):
             d['appeal_type_name'] = APPEAL_TYPE_MAP.get(d['appeal_type'], d['appeal_type'])
+        if d.get('appeal_count') and d['appeal_count'] > 0:
+            history = db.execute("""
+                SELECT id, appeal_code, appeal_type, status, priority, conclusion, final_score,
+                       created_at, completed_at
+                FROM review_appeals WHERE paper_id = ? ORDER BY id DESC
+            """, [d['id']]).fetchall()
+            d['appeal_history'] = [{
+                'id': h['id'], 'appeal_code': h['appeal_code'],
+                'appeal_type': h['appeal_type'],
+                'appeal_type_name': APPEAL_TYPE_MAP.get(h['appeal_type'], h['appeal_type']),
+                'status': h['status'],
+                'status_name': APPEAL_STATUS_MAP.get(h['status'], h['status']),
+                'priority': h['priority'],
+                'conclusion': h['conclusion'],
+                'final_score': float(h['final_score']) if h['final_score'] is not None else None,
+                'created_at': str(h['created_at']) if h['created_at'] else None,
+                'completed_at': str(h['completed_at']) if h['completed_at'] else None,
+            } for h in history]
         result.append(d)
 
     return jsonify({
