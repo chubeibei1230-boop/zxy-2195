@@ -19,6 +19,7 @@ def create_app(config_class=Config):
     from app.routes.auditor_routes import auditor_bp
     from app.routes.query_routes import query_bp
     from app.routes.alert_routes import alert_bp
+    from app.routes.review_appeal_routes import appeal_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(admin_bp)
@@ -26,6 +27,7 @@ def create_app(config_class=Config):
     app.register_blueprint(auditor_bp)
     app.register_blueprint(query_bp)
     app.register_blueprint(alert_bp)
+    app.register_blueprint(appeal_bp)
 
     app.teardown_appcontext(close_db)
 

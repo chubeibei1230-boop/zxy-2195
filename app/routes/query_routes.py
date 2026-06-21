@@ -3,7 +3,8 @@ from flask import Blueprint, request, jsonify
 
 from app.db import get_db
 from app.utils import (
-    role_required, rows_to_list, STATUS_MAP, ROLE_MAP
+    role_required, rows_to_list, STATUS_MAP, ROLE_MAP,
+    APPEAL_STATUS_MAP, APPEAL_TYPE_MAP, get_paper_latest_appeal
 )
 
 query_bp = Blueprint('query', __name__, url_prefix='/api/query')
@@ -31,6 +32,7 @@ def query_papers():
         FROM papers p
         LEFT JOIN batches b ON p.batch_id = b.id
         LEFT JOIN question_groups qg ON p.question_group_id = qg.id
+        LEFT JOIN review_appeals ra ON p.current_appeal_id = ra.id
         WHERE 1=1
     """
     params = []
@@ -90,7 +92,9 @@ def query_papers():
 
     query = f"""
         SELECT p.*, b.batch_name, b.batch_code, qg.group_name as question_group_name,
-               qg.group_code as question_group_code, qg.max_score, qg.pass_score
+               qg.group_code as question_group_code, qg.max_score, qg.pass_score,
+               ra.id as current_appeal_id, ra.status as appeal_status,
+               ra.appeal_type, ra.priority, ra.reason
         {base_query}
         ORDER BY p.id DESC
         LIMIT ? OFFSET ?
@@ -102,6 +106,11 @@ def query_papers():
     for r in rows:
         d = dict(r)
         d['status_name'] = STATUS_MAP.get(d['current_status'], d['current_status'])
+
+        if d.get('appeal_status'):
+            d['appeal_status_name'] = APPEAL_STATUS_MAP.get(d['appeal_status'], d['appeal_status'])
+        if d.get('appeal_type'):
+            d['appeal_type_name'] = APPEAL_TYPE_MAP.get(d['appeal_type'], d['appeal_type'])
 
         init_r = db.execute("""
             SELECT ri.initial_score, ri.deduction_reason, ri.difficulty_flag,
@@ -167,6 +176,7 @@ def query_tasks():
         LEFT JOIN question_groups qg ON p.question_group_id = qg.id
         LEFT JOIN users u ON t.assignee_id = u.id
         LEFT JOIN responsibility_groups rg ON t.group_id = rg.id
+        LEFT JOIN review_appeals ra ON t.appeal_id = ra.id
         WHERE 1=1
     """
     params = []
@@ -197,9 +207,11 @@ def query_tasks():
 
     query = f"""
         SELECT t.*, p.paper_number, p.candidate_name, p.current_status as paper_status,
+               p.is_reviewing, p.appeal_count,
                b.batch_name, qg.group_name as question_group_name,
                u.real_name as assignee_name, u.username as assignee_username, u.role as assignee_role,
-               rg.group_name as responsibility_group
+               rg.group_name as responsibility_group,
+               ra.id as appeal_id, ra.status as appeal_status, ra.appeal_type
         {base_query}
         ORDER BY t.id DESC
         LIMIT ? OFFSET ?
@@ -213,6 +225,10 @@ def query_tasks():
         d['status_name'] = STATUS_MAP.get(d['status'], d['status'])
         d['paper_status_name'] = STATUS_MAP.get(d['paper_status'], d['paper_status'])
         d['assignee_role_name'] = ROLE_MAP.get(d['assignee_role'], d['assignee_role']) if d['assignee_role'] else None
+        if d.get('appeal_status'):
+            d['appeal_status_name'] = APPEAL_STATUS_MAP.get(d['appeal_status'], d['appeal_status'])
+        if d.get('appeal_type'):
+            d['appeal_type_name'] = APPEAL_TYPE_MAP.get(d['appeal_type'], d['appeal_type'])
         result.append(d)
 
     return jsonify({

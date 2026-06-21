@@ -5,7 +5,7 @@ from app.db import get_db
 from app.utils import (
     role_required, get_current_user, row_to_dict, rows_to_list,
     ensure_single_active_task, update_paper_status, STATUS_MAP,
-    detect_anomalies
+    detect_anomalies, APPEAL_STATUS_MAP, APPEAL_TYPE_MAP
 )
 
 reviewer_bp = Blueprint('reviewer', __name__, url_prefix='/api/reviewer')
@@ -51,6 +51,7 @@ def list_tasks():
         LEFT JOIN batches b ON p.batch_id = b.id
         LEFT JOIN question_groups qg ON p.question_group_id = qg.id
         LEFT JOIN responsibility_groups rg ON t.group_id = rg.id
+        LEFT JOIN review_appeals ra ON t.appeal_id = ra.id
         WHERE t.task_type = 'review'
     """
     params = []
@@ -66,8 +67,11 @@ def list_tasks():
     query = f"""
         SELECT t.*, p.paper_number, p.candidate_name, p.candidate_id,
                p.paper_content, p.storage_path, p.current_status as paper_status,
+               p.is_reviewing, p.appeal_count,
                b.batch_name, b.batch_code, qg.group_name as question_group_name,
-               qg.max_score, qg.pass_score, rg.group_name as responsibility_group
+               qg.max_score, qg.pass_score, rg.group_name as responsibility_group,
+               ra.id as appeal_id, ra.status as appeal_status, ra.appeal_type,
+               ra.priority
         {base_query}
         ORDER BY CASE WHEN t.status = 'reviewing' THEN 0
                       WHEN t.status = 'pending_assignment' THEN 1
@@ -82,6 +86,10 @@ def list_tasks():
         d = dict(r)
         d['status_name'] = STATUS_MAP.get(d['status'], d['status'])
         d['paper_status_name'] = STATUS_MAP.get(d['paper_status'], d['paper_status'])
+        if d.get('appeal_status'):
+            d['appeal_status_name'] = APPEAL_STATUS_MAP.get(d['appeal_status'], d['appeal_status'])
+        if d.get('appeal_type'):
+            d['appeal_type_name'] = APPEAL_TYPE_MAP.get(d['appeal_type'], d['appeal_type'])
 
         review = db.execute("""
             SELECT * FROM reviews WHERE task_id = ? LIMIT 1

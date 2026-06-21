@@ -264,3 +264,50 @@ ROLE_MAP = {
     'reviewer': '阅卷员',
     'auditor': '复核员'
 }
+
+APPEAL_STATUS_MAP = {
+    'pending': '申请中',
+    'accepted': '已受理',
+    'reviewing': '复评中',
+    'completed': '已完成',
+    'rejected': '已驳回'
+}
+
+APPEAL_TYPE_MAP = {
+    'quality_check': '质量抽查',
+    'abnormal_diff': '异常分差',
+    'manual_correction': '人工纠错'
+}
+
+APPEAL_PRIORITY_MAP = {
+    'high': '高',
+    'medium': '中',
+    'low': '低'
+}
+
+
+def generate_appeal_code():
+    from datetime import datetime
+    ts = datetime.now().strftime('%Y%m%d%H%M%S%f')
+    return f"AP{ts}"
+
+
+def add_appeal_log(db, appeal_id, operator_id, action, remark="", from_status=None, to_status=None):
+    db.execute("""
+        INSERT INTO review_appeal_logs (appeal_id, operator_id, action, remark, from_status, to_status)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, [appeal_id, operator_id, action, remark, from_status, to_status])
+
+
+def get_paper_latest_appeal(db, paper_id):
+    row = db.execute("""
+        SELECT ra.*, u.real_name as applicant_name, u.username as applicant_username,
+               h.real_name as handler_name, h.username as handler_username
+        FROM review_appeals ra
+        LEFT JOIN users u ON ra.applicant_id = u.id
+        LEFT JOIN users h ON ra.handler_id = h.id
+        WHERE ra.paper_id = ?
+        ORDER BY ra.id DESC
+        LIMIT 1
+    """, [paper_id]).fetchone()
+    return dict(row) if row else None

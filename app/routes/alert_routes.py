@@ -11,7 +11,8 @@ ALERT_TYPE_MAP = {
     'timeout': '阅卷超时',
     'difficulty_cluster': '题型疑难集中',
     'unfinalized_after_audit': '复核后未定分',
-    'backlog': '责任组处理积压'
+    'backlog': '责任组处理积压',
+    'review_appeal': '复评申请提醒'
 }
 
 ALERT_LEVEL_MAP = {
@@ -37,6 +38,7 @@ def list_alerts():
         LEFT JOIN tasks t ON a.task_id = t.id
         LEFT JOIN question_groups qg ON a.question_group_id = qg.id
         LEFT JOIN responsibility_groups rg ON a.group_id = rg.id
+        LEFT JOIN review_appeals ra ON a.paper_id = ra.paper_id AND ra.status IN ('pending', 'accepted', 'reviewing')
         WHERE 1=1
     """
     params = []
@@ -54,9 +56,11 @@ def list_alerts():
     count = db.execute(f"SELECT COUNT(*) {base_query}", params).fetchval()
 
     query = f"""
-        SELECT a.*, p.paper_number, t.task_code, t.status as task_status,
+        SELECT a.*, p.paper_number, p.is_reviewing, p.appeal_count,
+               t.task_code, t.status as task_status, t.is_review_task, t.appeal_id as task_appeal_id,
                qg.group_name as question_group_name,
-               rg.group_name as responsibility_group
+               rg.group_name as responsibility_group,
+               ra.id as appeal_id, ra.status as appeal_status, ra.appeal_type, ra.priority
         {base_query}
         ORDER BY CASE WHEN a.is_handled = false THEN 0 ELSE 1 END,
                  CASE a.alert_level
@@ -76,6 +80,10 @@ def list_alerts():
         d['alert_level_name'] = ALERT_LEVEL_MAP.get(d['alert_level'], d['alert_level'])
         if d.get('task_status'):
             d['task_status_name'] = STATUS_MAP.get(d['task_status'], d['task_status'])
+        if d.get('appeal_status'):
+            from app.utils import APPEAL_STATUS_MAP, APPEAL_TYPE_MAP
+            d['appeal_status_name'] = APPEAL_STATUS_MAP.get(d['appeal_status'], d['appeal_status'])
+            d['appeal_type_name'] = APPEAL_TYPE_MAP.get(d['appeal_type'], d['appeal_type'])
         result.append(d)
 
     stats = db.execute(f"""
@@ -86,7 +94,8 @@ def list_alerts():
             COALESCE(SUM(CASE WHEN a.alert_type = 'timeout' AND a.is_handled = false THEN 1 ELSE 0 END), 0) as timeout_count,
             COALESCE(SUM(CASE WHEN a.alert_type = 'difficulty_cluster' AND a.is_handled = false THEN 1 ELSE 0 END), 0) as difficulty_count,
             COALESCE(SUM(CASE WHEN a.alert_type = 'unfinalized_after_audit' AND a.is_handled = false THEN 1 ELSE 0 END), 0) as unfinalized_count,
-            COALESCE(SUM(CASE WHEN a.alert_type = 'backlog' AND a.is_handled = false THEN 1 ELSE 0 END), 0) as backlog_count
+            COALESCE(SUM(CASE WHEN a.alert_type = 'backlog' AND a.is_handled = false THEN 1 ELSE 0 END), 0) as backlog_count,
+            COALESCE(SUM(CASE WHEN a.alert_type = 'review_appeal' AND a.is_handled = false THEN 1 ELSE 0 END), 0) as review_appeal_count
         {base_query}
     """, params[:-2]).fetchone()
 
@@ -172,8 +181,20 @@ def summary():
         d['alert_level_name'] = ALERT_LEVEL_MAP.get(d['alert_level'], d['alert_level'])
         result.append(d)
 
+    appeal_stats = db.execute("""
+        SELECT
+            COUNT(*) as total_appeals,
+            COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) as pending_appeals,
+            COALESCE(SUM(CASE WHEN status = 'reviewing' THEN 1 ELSE 0 END), 0) as reviewing_appeals,
+            COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) as completed_appeals,
+            COALESCE(SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END), 0) as rejected_appeals,
+            COALESCE(SUM(CASE WHEN priority = 'high' AND status IN ('pending', 'accepted', 'reviewing') THEN 1 ELSE 0 END), 0) as high_priority_pending
+        FROM review_appeals
+    """).fetchone()
+
     recent = db.execute("""
-        SELECT a.*, p.paper_number, qg.group_name as question_group_name
+        SELECT a.*, p.paper_number, qg.group_name as question_group_name,
+               p.is_reviewing, p.appeal_count
         FROM alerts a
         LEFT JOIN papers p ON a.paper_id = p.id
         LEFT JOIN question_groups qg ON a.question_group_id = qg.id
@@ -191,7 +212,8 @@ def summary():
 
     return jsonify({
         "by_type_level": result,
-        "recent_unhandled": recent_result
+        "recent_unhandled": recent_result,
+        "review_appeal_stats": dict(appeal_stats)
     }), 200
 
 

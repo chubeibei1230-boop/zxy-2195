@@ -135,6 +135,8 @@ def init_db(app):
             CREATE SEQUENCE IF NOT EXISTS seq_tasks START 1;
             CREATE SEQUENCE IF NOT EXISTS seq_reviews START 1;
             CREATE SEQUENCE IF NOT EXISTS seq_alerts START 1;
+            CREATE SEQUENCE IF NOT EXISTS seq_review_appeals START 1;
+            CREATE SEQUENCE IF NOT EXISTS seq_review_appeal_logs START 1;
         """)
 
         db.execute("""
@@ -191,12 +193,27 @@ def init_db(app):
                 storage_path VARCHAR(500),
                 current_status VARCHAR(30) DEFAULT 'pending_assignment',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_reviewing BOOLEAN DEFAULT false,
+                current_appeal_id INTEGER,
+                appeal_count INTEGER DEFAULT 0,
                 CHECK (current_status IN (
                     'pending_assignment', 'reviewing', 'pending_audit',
                     'diff_pending', 'finalized', 'suspended'
                 ))
             );
         """)
+        try:
+            db.execute("ALTER TABLE papers ADD COLUMN is_reviewing BOOLEAN DEFAULT false")
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE papers ADD COLUMN current_appeal_id INTEGER")
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE papers ADD COLUMN appeal_count INTEGER DEFAULT 0")
+        except Exception:
+            pass
 
         db.execute("""
             CREATE TABLE IF NOT EXISTS scoring_rules (
@@ -242,6 +259,9 @@ def init_db(app):
                 is_active BOOLEAN DEFAULT true,
                 return_reason TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_review_task BOOLEAN DEFAULT false,
+                appeal_id INTEGER,
+                review_round INTEGER DEFAULT 1,
                 CHECK (task_type IN ('review', 'audit')),
                 CHECK (status IN (
                     'pending_assignment', 'reviewing', 'pending_audit',
@@ -249,6 +269,18 @@ def init_db(app):
                 ))
             );
         """)
+        try:
+            db.execute("ALTER TABLE tasks ADD COLUMN is_review_task BOOLEAN DEFAULT false")
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE tasks ADD COLUMN appeal_id INTEGER")
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE tasks ADD COLUMN review_round INTEGER DEFAULT 1")
+        except Exception:
+            pass
 
         db.execute("""
             CREATE TABLE IF NOT EXISTS reviews (
@@ -268,9 +300,24 @@ def init_db(app):
                 handling_opinion TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_review BOOLEAN DEFAULT false,
+                appeal_id INTEGER,
+                review_round INTEGER DEFAULT 1,
                 CHECK (review_type IN ('initial', 'audit'))
             );
         """)
+        try:
+            db.execute("ALTER TABLE reviews ADD COLUMN is_review BOOLEAN DEFAULT false")
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE reviews ADD COLUMN appeal_id INTEGER")
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE reviews ADD COLUMN review_round INTEGER DEFAULT 1")
+        except Exception:
+            pass
 
         db.execute("""
             CREATE TABLE IF NOT EXISTS alerts (
@@ -288,11 +335,50 @@ def init_db(app):
                 handled_at TIMESTAMP,
                 CHECK (alert_type IN (
                     'score_diff', 'timeout', 'difficulty_cluster',
-                    'unfinalized_after_audit', 'backlog'
+                    'unfinalized_after_audit', 'backlog', 'review_appeal'
                 )),
                 CHECK (alert_level IN ('info', 'warning', 'critical'))
             );
         """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS review_appeals (
+                id INTEGER PRIMARY KEY DEFAULT nextval('seq_review_appeals'),
+                appeal_code VARCHAR(50) UNIQUE NOT NULL,
+                paper_id INTEGER NOT NULL,
+                applicant_id INTEGER NOT NULL,
+                appeal_type VARCHAR(30) NOT NULL,
+                priority VARCHAR(20) NOT NULL DEFAULT 'medium',
+                reason TEXT NOT NULL,
+                description TEXT,
+                status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                handler_id INTEGER,
+                conclusion TEXT,
+                final_score DECIMAL(10,2),
+                original_status VARCHAR(30),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                accepted_at TIMESTAMP,
+                started_at TIMESTAMP,
+                completed_at TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                CHECK (appeal_type IN ('quality_check', 'abnormal_diff', 'manual_correction')),
+                CHECK (priority IN ('high', 'medium', 'low')),
+                CHECK (status IN ('pending', 'accepted', 'reviewing', 'completed', 'rejected'))
+            );
+        """)
+
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS review_appeal_logs (
+                id INTEGER PRIMARY KEY DEFAULT nextval('seq_review_appeal_logs'),
+                appeal_id INTEGER NOT NULL,
+                operator_id INTEGER,
+                action VARCHAR(30) NOT NULL,
+                remark TEXT,
+                from_status VARCHAR(20),
+                to_status VARCHAR(20),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
         # TODO: DuckDB 0.10.0 索引bug，暂时禁用所有索引
         # db.execute("""
         #     CREATE INDEX IF NOT EXISTS idx_papers_status ON papers(current_status);
@@ -306,6 +392,9 @@ def init_db(app):
         #     CREATE INDEX IF NOT EXISTS idx_reviews_task ON reviews(task_id);
         #     CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(alert_type);
         #     CREATE INDEX IF NOT EXISTS idx_alerts_unhandled ON alerts(is_handled);
+        #     CREATE INDEX IF NOT EXISTS idx_appeals_paper ON review_appeals(paper_id);
+        #     CREATE INDEX IF NOT EXISTS idx_appeals_status ON review_appeals(status);
+        #     CREATE INDEX IF NOT EXISTS idx_appeal_logs_appeal ON review_appeal_logs(appeal_id);
         # """)
 
         try:
