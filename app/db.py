@@ -137,6 +137,7 @@ def init_db(app):
             CREATE SEQUENCE IF NOT EXISTS seq_alerts START 1;
             CREATE SEQUENCE IF NOT EXISTS seq_review_appeals START 1;
             CREATE SEQUENCE IF NOT EXISTS seq_review_appeal_logs START 1;
+            CREATE SEQUENCE IF NOT EXISTS seq_review_return_records START 1;
         """)
 
         db.execute("""
@@ -196,9 +197,13 @@ def init_db(app):
                 is_reviewing BOOLEAN DEFAULT false,
                 current_appeal_id INTEGER,
                 appeal_count INTEGER DEFAULT 0,
+                current_round INTEGER DEFAULT 1,
+                return_count INTEGER DEFAULT 0,
+                latest_return_reason TEXT,
+                latest_return_reason_type VARCHAR(30),
                 CHECK (current_status IN (
                     'pending_assignment', 'reviewing', 'pending_audit',
-                    'diff_pending', 'finalized', 'suspended'
+                    'diff_pending', 'finalized', 'suspended', 'pending_reeval'
                 ))
             );
         """)
@@ -212,6 +217,22 @@ def init_db(app):
             pass
         try:
             db.execute("ALTER TABLE papers ADD COLUMN appeal_count INTEGER DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE papers ADD COLUMN current_round INTEGER DEFAULT 1")
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE papers ADD COLUMN return_count INTEGER DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE papers ADD COLUMN latest_return_reason TEXT")
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE papers ADD COLUMN latest_return_reason_type VARCHAR(30)")
         except Exception:
             pass
 
@@ -265,7 +286,8 @@ def init_db(app):
                 CHECK (task_type IN ('review', 'audit')),
                 CHECK (status IN (
                     'pending_assignment', 'reviewing', 'pending_audit',
-                    'diff_pending', 'finalized', 'suspended', 'returned'
+                    'diff_pending', 'finalized', 'suspended', 'returned',
+                    'pending_reeval'
                 ))
             );
         """)
@@ -279,6 +301,10 @@ def init_db(app):
             pass
         try:
             db.execute("ALTER TABLE tasks ADD COLUMN review_round INTEGER DEFAULT 1")
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE tasks ADD COLUMN return_record_id INTEGER")
         except Exception:
             pass
 
@@ -335,7 +361,8 @@ def init_db(app):
                 handled_at TIMESTAMP,
                 CHECK (alert_type IN (
                     'score_diff', 'timeout', 'difficulty_cluster',
-                    'unfinalized_after_audit', 'backlog', 'review_appeal'
+                    'unfinalized_after_audit', 'backlog', 'review_appeal',
+                    'return_reeval'
                 )),
                 CHECK (alert_level IN ('info', 'warning', 'critical'))
             );
@@ -376,6 +403,31 @@ def init_db(app):
                 from_status VARCHAR(20),
                 to_status VARCHAR(20),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS review_return_records (
+                id INTEGER PRIMARY KEY DEFAULT nextval('seq_review_return_records'),
+                return_code VARCHAR(50) UNIQUE NOT NULL,
+                paper_id INTEGER NOT NULL,
+                task_id INTEGER,
+                auditor_id INTEGER NOT NULL,
+                return_reason TEXT NOT NULL,
+                return_reason_type VARCHAR(30) NOT NULL,
+                handling_opinion TEXT,
+                return_round INTEGER DEFAULT 1,
+                status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                reeval_task_id INTEGER,
+                reevaluated_at TIMESTAMP,
+                closed_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                CHECK (return_reason_type IN (
+                    'insufficient_basis', 'missing_deduction',
+                    'inconsistent_flag', 'unfounded_diff', 'other'
+                )),
+                CHECK (status IN ('pending', 'reevaluating', 'reevaluated', 'closed'))
             );
         """)
 

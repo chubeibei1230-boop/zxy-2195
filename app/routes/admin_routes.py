@@ -8,7 +8,8 @@ from app.utils import (
     role_required, get_current_user, row_to_dict, rows_to_list,
     generate_task_code, ensure_single_active_task, calculate_deadline,
     update_paper_status, STATUS_MAP, ROLE_MAP,
-    APPEAL_STATUS_MAP, APPEAL_TYPE_MAP
+    APPEAL_STATUS_MAP, APPEAL_TYPE_MAP, APPEAL_PRIORITY_MAP,
+    RETURN_REASON_TYPE_MAP, RETURN_STATUS_MAP
 )
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/api/admin')
@@ -316,11 +317,36 @@ def list_papers():
                 'status': h['status'],
                 'status_name': APPEAL_STATUS_MAP.get(h['status'], h['status']),
                 'priority': h['priority'],
+                'priority_name': APPEAL_PRIORITY_MAP.get(h['priority'], h['priority']),
                 'conclusion': h['conclusion'],
                 'final_score': float(h['final_score']) if h['final_score'] is not None else None,
                 'created_at': str(h['created_at']) if h['created_at'] else None,
                 'completed_at': str(h['completed_at']) if h['completed_at'] else None,
             } for h in history]
+        if d.get('return_count') and d['return_count'] > 0:
+            return_history = db.execute("""
+                SELECT id, return_code, return_reason, return_reason_type,
+                       handling_opinion, return_round, status,
+                       created_at, reevaluated_at, closed_at
+                FROM review_return_records WHERE paper_id = ? ORDER BY id ASC
+            """, [d['id']]).fetchall()
+            d['return_history'] = [{
+                'id': h['id'],
+                'return_code': h['return_code'],
+                'return_reason': h['return_reason'],
+                'return_reason_type': h['return_reason_type'],
+                'return_reason_type_name': RETURN_REASON_TYPE_MAP.get(h['return_reason_type'], h['return_reason_type']),
+                'handling_opinion': h['handling_opinion'],
+                'return_round': h['return_round'],
+                'status': h['status'],
+                'status_name': RETURN_STATUS_MAP.get(h['status'], h['status']),
+                'created_at': str(h['created_at']) if h['created_at'] else None,
+                'reevaluated_at': str(h['reevaluated_at']) if h['reevaluated_at'] else None,
+                'closed_at': str(h['closed_at']) if h['closed_at'] else None,
+            } for h in return_history]
+        if d.get('latest_return_reason_type'):
+            d['latest_return_reason_type_name'] = RETURN_REASON_TYPE_MAP.get(
+                d['latest_return_reason_type'], d['latest_return_reason_type'])
         result.append(d)
 
     return jsonify({
@@ -798,6 +824,26 @@ def list_tasks():
             d['appeal_status_name'] = APPEAL_STATUS_MAP.get(d['appeal_status'], d['appeal_status'])
         if d.get('appeal_type'):
             d['appeal_type_name'] = APPEAL_TYPE_MAP.get(d['appeal_type'], d['appeal_type'])
+
+        if d.get('return_record_id'):
+            ret = db.execute("""
+                SELECT rr.return_code, rr.return_reason, rr.return_reason_type,
+                       rr.handling_opinion, rr.return_round, rr.status as return_status
+                FROM review_return_records rr
+                WHERE rr.id = ?
+            """, [d['return_record_id']]).fetchone()
+            if ret:
+                d['return_info'] = {
+                    'return_code': ret['return_code'],
+                    'return_reason': ret['return_reason'],
+                    'return_reason_type': ret['return_reason_type'],
+                    'return_reason_type_name': RETURN_REASON_TYPE_MAP.get(ret['return_reason_type'], ret['return_reason_type']),
+                    'handling_opinion': ret['handling_opinion'],
+                    'return_round': ret['return_round'],
+                    'return_status': ret['return_status'],
+                    'return_status_name': RETURN_STATUS_MAP.get(ret['return_status'], ret['return_status']),
+                }
+
         result.append(d)
 
     return jsonify({
@@ -813,7 +859,7 @@ def list_tasks():
 def update_task_status(task_id):
     data = request.get_json()
     new_status = data.get('status')
-    if new_status not in STATUS_MAP and new_status not in ('returned', 'suspended'):
+    if new_status not in STATUS_MAP and new_status not in ('returned', 'suspended', 'pending_reeval'):
         return jsonify({"error": "无效状态"}), 400
 
     db = get_db()

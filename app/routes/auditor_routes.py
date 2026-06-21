@@ -5,7 +5,8 @@ from app.db import get_db
 from app.utils import (
     role_required, get_current_user, row_to_dict, rows_to_list,
     ensure_single_active_task, update_paper_status, check_score_diff,
-    STATUS_MAP, detect_anomalies, APPEAL_STATUS_MAP, APPEAL_TYPE_MAP
+    STATUS_MAP, detect_anomalies, APPEAL_STATUS_MAP, APPEAL_TYPE_MAP,
+    RETURN_REASON_TYPE_MAP, RETURN_STATUS_MAP
 )
 
 auditor_bp = Blueprint('auditor', __name__, url_prefix='/api/auditor')
@@ -462,3 +463,158 @@ def resolve_diff(paper_id):
         "message": "差异已处理，试卷已定分",
         "final_score": final_score
     }), 200
+
+
+@auditor_bp.route('/tasks/<int:task_id>/return-for-reeval', methods=['POST'])
+@role_required('auditor', 'admin')
+def return_for_reeval(task_id):
+    data = request.get_json(force=True, silent=True) or {}
+    user = get_current_user()
+    db = get_db()
+
+    return_reason = (data.get('return_reason') or '').strip()
+    return_reason_type = data.get('return_reason_type')
+    handling_opinion = (data.get('handling_opinion') or '').strip()
+
+    if not return_reason or not return_reason_type:
+        return jsonify({"error": "退回原因和退回原因类型为必填项"}), 400
+
+    if return_reason_type not in RETURN_REASON_TYPE_MAP:
+        return jsonify({"error": "无效的退回原因类型"}), 400
+
+    task = db.execute("""
+        SELECT t.id, t.paper_id, t.status, t.assignee_id, t.is_active
+        FROM tasks t
+        WHERE t.id = ? AND t.task_type = 'audit'
+    """, [task_id]).fetchone()
+
+    if not task:
+        return jsonify({"error": "任务不存在"}), 404
+    if task['assignee_id'] != user['id'] and user['role'] != 'admin':
+        return jsonify({"error": "无权操作此任务"}), 403
+    if not task['is_active']:
+        return jsonify({"error": "任务已失效"}), 400
+    if task['status'] not in ('pending_audit', 'diff_pending'):
+        return jsonify({"error": f"当前状态{task['status']}不允许退回重评"}), 400
+
+    from app.utils import generate_return_code, get_paper_return_count
+    from config import Config
+
+    paper = db.execute("""
+        SELECT id, paper_number, current_status, current_round, return_count,
+               question_group_id, batch_id
+        FROM papers WHERE id = ?
+    """, [task['paper_id']]).fetchone()
+
+    now = datetime.now()
+    return_code = generate_return_code()
+    return_round = (paper['return_count'] or 0) + 1
+
+    cursor = db.execute("""
+        INSERT INTO review_return_records (
+            return_code, paper_id, task_id, auditor_id, return_reason,
+            return_reason_type, handling_opinion, return_round, status,
+            created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        RETURNING id
+    """, [return_code, task['paper_id'], task_id, user['id'], return_reason,
+          return_reason_type, handling_opinion, return_round, now])
+    return_id = cursor.fetchval()
+
+    db.execute("""
+        UPDATE tasks SET status = 'returned', is_active = false WHERE id = ?
+    """, [task_id])
+
+    update_paper_status(db, task['paper_id'], 'pending_reeval')
+    db.execute("""
+        UPDATE papers SET
+            current_round = ?,
+            return_count = ?,
+            latest_return_reason = ?,
+            latest_return_reason_type = ?
+        WHERE id = ?
+    """, [return_round, return_round, return_reason, return_reason_type, task['paper_id']])
+
+    rg = db.execute("""
+        SELECT id, review_time_limit_hours
+        FROM responsibility_groups
+        WHERE question_group_id = ? AND (batch_id = ? OR batch_id IS NULL)
+        ORDER BY batch_id DESC NULLS LAST LIMIT 1
+    """, [paper['question_group_id'], paper['batch_id']]).fetchone()
+
+    final_group_id = rg['id'] if rg else None
+    deadline_hours = float(rg['review_time_limit_hours']) if rg else Config.REVIEW_TIMEOUT_HOURS
+    from app.utils import calculate_deadline, generate_task_code
+    deadline = calculate_deadline(deadline_hours)
+
+    active_task = ensure_single_active_task(db, task['paper_id'], 'review')
+    if active_task:
+        db.execute("UPDATE tasks SET is_active = false WHERE id = ?", [active_task['id']])
+
+    assignee_id = data.get('assignee_id')
+    if not assignee_id:
+        last_reviewer = db.execute("""
+            SELECT t.assignee_id FROM tasks t
+            WHERE t.paper_id = ? AND t.task_type = 'review'
+            ORDER BY t.id DESC LIMIT 1
+        """, [task['paper_id']]).fetchone()
+        if last_reviewer and last_reviewer['assignee_id']:
+            same_user = db.execute(
+                "SELECT id FROM users WHERE id = ? AND is_active = true AND role IN ('reviewer', 'admin')",
+                [last_reviewer['assignee_id']]
+            ).fetchone()
+            if same_user:
+                assignee_id = last_reviewer['assignee_id']
+
+    if assignee_id:
+        assignee = db.execute(
+            "SELECT id, role FROM users WHERE id = ? AND is_active = true",
+            [assignee_id]
+        ).fetchone()
+        if not assignee or assignee['role'] not in ('reviewer', 'admin'):
+            assignee_id = None
+
+    task_code = generate_task_code('review')
+    task_cursor = db.execute("""
+        INSERT INTO tasks (
+            task_code, paper_id, task_type, assignee_id, group_id, status,
+            assigned_at, deadline_at, is_active, review_round, return_record_id
+        ) VALUES (?, ?, 'review', ?, ?, 'pending_reeval', ?, ?, true, ?, ?)
+        RETURNING id
+    """, [task_code, task['paper_id'], assignee_id, final_group_id,
+          now, deadline, return_round, return_id])
+    new_task_id = task_cursor.fetchval()
+
+    if assignee_id:
+        db.execute("""
+            INSERT INTO reviews (task_id, paper_id, reviewer_id, review_type, review_round)
+            VALUES (?, ?, ?, 'initial', ?)
+        """, [new_task_id, task['paper_id'], assignee_id, return_round])
+
+    db.execute("""
+        UPDATE review_return_records SET reeval_task_id = ?, status = 'reevaluating', updated_at = ?
+        WHERE id = ?
+    """, [new_task_id, now, return_id])
+
+    alert_level = 'critical' if return_round >= 3 else ('warning' if return_round >= 2 else 'info')
+    reason_name = RETURN_REASON_TYPE_MAP.get(return_reason_type, return_reason_type)
+    db.execute("""
+        INSERT INTO alerts (alert_type, alert_level, paper_id, message, detail_json)
+        VALUES ('return_reeval', ?, ?, ?, ?)
+    """, [
+        alert_level,
+        task['paper_id'],
+        f"退回重评：试卷{paper['paper_number']}，第{return_round}轮退回，原因：{reason_name}",
+        f'{{"return_id": {return_id}, "return_code": "{return_code}", "return_round": {return_round}, "return_reason_type": "{return_reason_type}"}}'
+    ])
+
+    db.commit()
+
+    return jsonify({
+        "id": return_id,
+        "return_code": return_code,
+        "return_round": return_round,
+        "new_task_id": new_task_id,
+        "task_code": task_code,
+        "message": "退回重评已发起，试卷已进入待重评状态"
+    }), 201

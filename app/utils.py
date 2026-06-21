@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta
 from flask import jsonify, request
 from functools import wraps
@@ -11,7 +12,8 @@ def role_required(*roles):
         @wraps(fn)
         def decorator(*args, **kwargs):
             verify_jwt_in_request()
-            identity = get_jwt_identity()
+            identity_raw = get_jwt_identity()
+            identity = json.loads(identity_raw) if isinstance(identity_raw, str) else identity_raw
             db = get_db()
             user = db.execute(
                 "SELECT id, role, is_active FROM users WHERE id = ?",
@@ -29,7 +31,8 @@ def role_required(*roles):
 
 
 def get_current_user():
-    identity = get_jwt_identity()
+    identity_raw = get_jwt_identity()
+    identity = json.loads(identity_raw) if isinstance(identity_raw, str) else identity_raw
     db = get_db()
     user = db.execute(
         "SELECT id, username, role, real_name, group_id, is_active FROM users WHERE id = ?",
@@ -59,7 +62,7 @@ def calculate_deadline(hours=48):
 def update_paper_status(db, paper_id, new_status):
     valid_statuses = [
         'pending_assignment', 'reviewing', 'pending_audit',
-        'diff_pending', 'finalized', 'suspended'
+        'diff_pending', 'finalized', 'suspended', 'pending_reeval'
     ]
     if new_status not in valid_statuses:
         raise ValueError(f"无效状态: {new_status}")
@@ -256,7 +259,23 @@ STATUS_MAP = {
     'diff_pending': '差异待处理',
     'finalized': '已定分',
     'suspended': '暂停处理',
-    'returned': '已退回'
+    'returned': '已退回',
+    'pending_reeval': '待重评'
+}
+
+RETURN_REASON_TYPE_MAP = {
+    'insufficient_basis': '初评分依据不足',
+    'missing_deduction': '扣分说明缺失',
+    'inconsistent_flag': '疑难标记与内容不一致',
+    'unfounded_diff': '分差原因无法成立',
+    'other': '其他'
+}
+
+RETURN_STATUS_MAP = {
+    'pending': '待重评',
+    'reevaluating': '重评中',
+    'reevaluated': '已重评',
+    'closed': '已闭环'
 }
 
 ROLE_MAP = {
@@ -311,3 +330,24 @@ def get_paper_latest_appeal(db, paper_id):
         LIMIT 1
     """, [paper_id]).fetchone()
     return dict(row) if row else None
+
+
+def generate_return_code():
+    ts = datetime.now().strftime('%Y%m%d%H%M%S%f')
+    return f"RT{ts}"
+
+
+def get_paper_return_count(db, paper_id):
+    result = db.execute(
+        "SELECT COUNT(*) as cnt FROM review_return_records WHERE paper_id = ?",
+        [paper_id]
+    ).fetchval()
+    return result or 0
+
+
+def get_paper_current_round(db, paper_id):
+    result = db.execute(
+        "SELECT current_round FROM papers WHERE id = ?",
+        [paper_id]
+    ).fetchval()
+    return result or 1

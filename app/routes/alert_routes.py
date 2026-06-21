@@ -12,7 +12,8 @@ ALERT_TYPE_MAP = {
     'difficulty_cluster': '题型疑难集中',
     'unfinalized_after_audit': '复核后未定分',
     'backlog': '责任组处理积压',
-    'review_appeal': '复评申请提醒'
+    'review_appeal': '复评申请提醒',
+    'return_reeval': '退回重评提醒'
 }
 
 ALERT_LEVEL_MAP = {
@@ -95,7 +96,8 @@ def list_alerts():
             COALESCE(SUM(CASE WHEN a.alert_type = 'difficulty_cluster' AND a.is_handled = false THEN 1 ELSE 0 END), 0) as difficulty_count,
             COALESCE(SUM(CASE WHEN a.alert_type = 'unfinalized_after_audit' AND a.is_handled = false THEN 1 ELSE 0 END), 0) as unfinalized_count,
             COALESCE(SUM(CASE WHEN a.alert_type = 'backlog' AND a.is_handled = false THEN 1 ELSE 0 END), 0) as backlog_count,
-            COALESCE(SUM(CASE WHEN a.alert_type = 'review_appeal' AND a.is_handled = false THEN 1 ELSE 0 END), 0) as review_appeal_count
+            COALESCE(SUM(CASE WHEN a.alert_type = 'review_appeal' AND a.is_handled = false THEN 1 ELSE 0 END), 0) as review_appeal_count,
+            COALESCE(SUM(CASE WHEN a.alert_type = 'return_reeval' AND a.is_handled = false THEN 1 ELSE 0 END), 0) as return_reeval_count
         {base_query}
     """, params[:-2]).fetchone()
 

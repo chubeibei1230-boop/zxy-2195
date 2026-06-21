@@ -5,7 +5,8 @@ from app.db import get_db
 from app.utils import (
     role_required, get_current_user, row_to_dict, rows_to_list,
     ensure_single_active_task, update_paper_status, STATUS_MAP,
-    detect_anomalies, APPEAL_STATUS_MAP, APPEAL_TYPE_MAP
+    detect_anomalies, APPEAL_STATUS_MAP, APPEAL_TYPE_MAP,
+    RETURN_REASON_TYPE_MAP, RETURN_STATUS_MAP
 )
 
 reviewer_bp = Blueprint('reviewer', __name__, url_prefix='/api/reviewer')
@@ -96,6 +97,29 @@ def list_tasks():
         """, [d['id']]).fetchone()
         if review:
             d['review'] = dict(review)
+
+        if d.get('return_record_id'):
+            ret = db.execute("""
+                SELECT rr.return_code, rr.return_reason, rr.return_reason_type,
+                       rr.handling_opinion, rr.return_round, rr.status as return_status,
+                       u.real_name as auditor_name
+                FROM review_return_records rr
+                LEFT JOIN users u ON rr.auditor_id = u.id
+                WHERE rr.id = ?
+            """, [d['return_record_id']]).fetchone()
+            if ret:
+                d['return_info'] = {
+                    'return_code': ret['return_code'],
+                    'return_reason': ret['return_reason'],
+                    'return_reason_type': ret['return_reason_type'],
+                    'return_reason_type_name': RETURN_REASON_TYPE_MAP.get(ret['return_reason_type'], ret['return_reason_type']),
+                    'handling_opinion': ret['handling_opinion'],
+                    'return_round': ret['return_round'],
+                    'return_status': ret['return_status'],
+                    'return_status_name': RETURN_STATUS_MAP.get(ret['return_status'], ret['return_status']),
+                    'auditor_name': ret['auditor_name'],
+                }
+
         result.append(d)
 
     return jsonify({
@@ -113,7 +137,7 @@ def start_task(task_id):
     db = get_db()
 
     task = db.execute("""
-        SELECT id, paper_id, status, assignee_id, is_active
+        SELECT id, paper_id, status, assignee_id, is_active, return_record_id
         FROM tasks WHERE id = ? AND task_type = 'review'
     """, [task_id]).fetchone()
 
@@ -125,7 +149,7 @@ def start_task(task_id):
         return jsonify({"error": "任务已失效"}), 400
     if task['status'] == 'reviewing':
         return jsonify({"message": "任务已在阅卷中"}), 200
-    if task['status'] not in ('pending_assignment', 'suspended'):
+    if task['status'] not in ('pending_assignment', 'suspended', 'pending_reeval'):
         return jsonify({"error": f"当前状态{task['status']}无法开始"}), 400
 
     db.execute("""
@@ -201,12 +225,29 @@ def submit_review(task_id):
         UPDATE tasks SET status = 'pending_audit', completed_at = ?, is_active = false WHERE id = ?
     """, [now, task_id])
     update_paper_status(db, task['paper_id'], 'pending_audit')
+
+    if task.get('return_record_id') or (hasattr(task, '__getitem__') and task.get('return_record_id')):
+        pass
+
+    return_record_id = None
+    task_full = db.execute("SELECT return_record_id FROM tasks WHERE id = ?", [task_id]).fetchone()
+    if task_full and task_full['return_record_id']:
+        return_record_id = task_full['return_record_id']
+
+    if return_record_id:
+        db.execute("""
+            UPDATE review_return_records
+            SET status = 'reevaluated', reevaluated_at = ?, updated_at = ?
+            WHERE id = ?
+        """, [now, now, return_record_id])
+
     detect_anomalies(db)
     db.commit()
 
     return jsonify({
         "message": "初评已提交，等待复核",
-        "initial_score": initial_score
+        "initial_score": initial_score,
+        "is_reeval": return_record_id is not None
     }), 200
 
 
@@ -297,7 +338,7 @@ def return_task(task_id):
 def review_history(paper_id):
     db = get_db()
     rows = db.execute("""
-        SELECT r.*, t.task_code, t.status as task_status,
+        SELECT r.*, t.task_code, t.status as task_status, t.review_round,
                u.real_name as reviewer_name, u.username
         FROM reviews r
         LEFT JOIN tasks t ON r.task_id = t.id
@@ -312,4 +353,36 @@ def review_history(paper_id):
         d['task_status_name'] = STATUS_MAP.get(d['task_status'], d['task_status'])
         result.append(d)
 
-    return jsonify(result), 200
+    returns = db.execute("""
+        SELECT rr.*, u.real_name as auditor_name
+        FROM review_return_records rr
+        LEFT JOIN users u ON rr.auditor_id = u.id
+        WHERE rr.paper_id = ?
+        ORDER BY rr.created_at ASC
+    """, [paper_id]).fetchall()
+
+    return_history = []
+    for rr in returns:
+        d = dict(rr)
+        d['return_reason_type_name'] = RETURN_REASON_TYPE_MAP.get(d['return_reason_type'], d['return_reason_type'])
+        d['status_name'] = RETURN_STATUS_MAP.get(d['status'], d['status'])
+        return_history.append(d)
+
+    paper = db.execute("""
+        SELECT current_round, return_count, latest_return_reason,
+               latest_return_reason_type, current_status
+        FROM papers WHERE id = ?
+    """, [paper_id]).fetchone()
+
+    paper_info = dict(paper) if paper else {}
+    if paper_info.get('current_status'):
+        paper_info['status_name'] = STATUS_MAP.get(paper_info['current_status'], paper_info['current_status'])
+    if paper_info.get('latest_return_reason_type'):
+        paper_info['latest_return_reason_type_name'] = RETURN_REASON_TYPE_MAP.get(
+            paper_info['latest_return_reason_type'], paper_info['latest_return_reason_type'])
+
+    return jsonify({
+        "paper": paper_info,
+        "reviews": result,
+        "return_history": return_history
+    }), 200

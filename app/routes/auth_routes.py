@@ -1,4 +1,5 @@
 from flask import Blueprint, request, jsonify
+import json
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -33,11 +34,11 @@ def login():
         return jsonify({"error": "用户名或密码错误"}), 401
 
     access_token = create_access_token(
-        identity={
+        identity=json.dumps({
             "user_id": user['id'],
             "username": user['username'],
             "role": user['role']
-        }
+        })
     )
 
     return jsonify({
@@ -77,7 +78,8 @@ def change_password():
     if len(new_password) < 6:
         return jsonify({"error": "新密码长度不能少于6位"}), 400
 
-    identity = get_jwt_identity()
+    identity_raw = get_jwt_identity()
+    identity = json.loads(identity_raw) if isinstance(identity_raw, str) else identity_raw
     db = get_db()
     user = db.execute(
         "SELECT id, password_hash FROM users WHERE id = ?",
