@@ -13,7 +13,8 @@ ALERT_TYPE_MAP = {
     'unfinalized_after_audit': '复核后未定分',
     'backlog': '责任组处理积压',
     'review_appeal': '复评申请提醒',
-    'return_reeval': '退回重评提醒'
+    'return_reeval': '退回重评提醒',
+    'task_supervision': '任务督办提醒'
 }
 
 ALERT_LEVEL_MAP = {

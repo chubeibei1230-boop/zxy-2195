@@ -21,6 +21,7 @@ def create_app(config_class=Config):
     from app.routes.alert_routes import alert_bp
     from app.routes.review_appeal_routes import appeal_bp
     from app.routes.review_return_routes import return_bp
+    from app.routes.supervision_routes import supervision_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(admin_bp)
@@ -30,6 +31,7 @@ def create_app(config_class=Config):
     app.register_blueprint(alert_bp)
     app.register_blueprint(appeal_bp)
     app.register_blueprint(return_bp)
+    app.register_blueprint(supervision_bp)
 
     app.teardown_appcontext(close_db)
 
@@ -61,7 +63,8 @@ def create_app(config_class=Config):
                 "auditor": "/api/auditor/*",
                 "query": "/api/query/*",
                 "alerts": "/api/alerts/*",
-                "returns": "/api/returns/*"
+                "returns": "/api/returns/*",
+                "supervisions": "/api/supervisions/*"
             }
         }
 

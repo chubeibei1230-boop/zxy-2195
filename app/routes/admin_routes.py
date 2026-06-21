@@ -9,7 +9,8 @@ from app.utils import (
     generate_task_code, ensure_single_active_task, calculate_deadline,
     update_paper_status, STATUS_MAP, ROLE_MAP,
     APPEAL_STATUS_MAP, APPEAL_TYPE_MAP, APPEAL_PRIORITY_MAP,
-    RETURN_REASON_TYPE_MAP, RETURN_STATUS_MAP
+    RETURN_REASON_TYPE_MAP, RETURN_STATUS_MAP,
+    get_task_supervision_info
 )
 
 admin_bp = Blueprint('admin', __name__, url_prefix='/api/admin')
@@ -347,6 +348,10 @@ def list_papers():
         if d.get('latest_return_reason_type'):
             d['latest_return_reason_type_name'] = RETURN_REASON_TYPE_MAP.get(
                 d['latest_return_reason_type'], d['latest_return_reason_type'])
+
+        from app.utils import get_paper_supervision_info
+        d['supervisions'] = get_paper_supervision_info(db, d['id'])
+
         result.append(d)
 
     return jsonify({
@@ -856,6 +861,8 @@ def list_tasks():
                     'return_status': ret['return_status'],
                     'return_status_name': RETURN_STATUS_MAP.get(ret['return_status'], ret['return_status']),
                 }
+
+        d['supervisions'] = get_task_supervision_info(db, d['id'])
 
         result.append(d)
 

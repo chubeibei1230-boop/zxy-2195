@@ -5,7 +5,8 @@ from app.db import get_db
 from app.utils import (
     role_required, rows_to_list, STATUS_MAP, ROLE_MAP,
     APPEAL_STATUS_MAP, APPEAL_TYPE_MAP, APPEAL_PRIORITY_MAP,
-    get_paper_latest_appeal, RETURN_REASON_TYPE_MAP, RETURN_STATUS_MAP
+    get_paper_latest_appeal, RETURN_REASON_TYPE_MAP, RETURN_STATUS_MAP,
+    get_paper_supervision_info, get_task_supervision_info
 )
 
 query_bp = Blueprint('query', __name__, url_prefix='/api/query')
@@ -28,6 +29,7 @@ def query_papers():
     score_diff_min = request.args.get('score_diff_min', type=float)
     score_diff_max = request.args.get('score_diff_max', type=float)
     keyword = request.args.get('keyword', '').strip()
+    supervision_status = request.args.get('supervision_status')
 
     base_query = """
         FROM papers p
@@ -57,6 +59,15 @@ def query_papers():
     if date_to:
         base_query += " AND p.created_at <= ?"
         params.append(date_to + " 23:59:59")
+
+    if supervision_status:
+        base_query += """
+            AND EXISTS (
+                SELECT 1 FROM task_supervisions ts
+                WHERE ts.paper_id = p.id AND ts.status = ?
+            )
+        """
+        params.append(supervision_status)
 
     if reviewer_id or auditor_id or (score_diff_min is not None) or (score_diff_max is not None):
         base_query += """
@@ -190,6 +201,8 @@ def query_papers():
         elif init_r and init_r['initial_score'] is not None:
             d['final_score'] = init_r['initial_score']
 
+        d['supervisions'] = get_paper_supervision_info(db, d['id'])
+
         result.append(d)
 
     return jsonify({
@@ -215,6 +228,7 @@ def query_tasks():
     assignee_id = request.args.get('assignee_id', type=int)
     date_from = request.args.get('date_from')
     date_to = request.args.get('date_to')
+    supervision_status = request.args.get('supervision_status')
 
     base_query = """
         FROM tasks t
@@ -252,6 +266,14 @@ def query_tasks():
     if date_to:
         base_query += " AND t.created_at <= ?"
         params.append(date_to + " 23:59:59")
+    if supervision_status:
+        base_query += """
+            AND EXISTS (
+                SELECT 1 FROM task_supervisions ts
+                WHERE ts.task_id = t.id AND ts.status = ?
+            )
+        """
+        params.append(supervision_status)
 
     count = db.execute(f"SELECT COUNT(*) {base_query}", params).fetchval()
 
@@ -298,6 +320,8 @@ def query_tasks():
                     'return_status': ret['return_status'],
                     'return_status_name': RETURN_STATUS_MAP.get(ret['return_status'], ret['return_status']),
                 }
+
+        d['supervisions'] = get_task_supervision_info(db, d['id'])
 
         result.append(d)
 

@@ -138,6 +138,9 @@ def init_db(app):
             CREATE SEQUENCE IF NOT EXISTS seq_review_appeals START 1;
             CREATE SEQUENCE IF NOT EXISTS seq_review_appeal_logs START 1;
             CREATE SEQUENCE IF NOT EXISTS seq_review_return_records START 1;
+            CREATE SEQUENCE IF NOT EXISTS seq_task_supervisions START 1;
+            CREATE SEQUENCE IF NOT EXISTS seq_task_reassignments START 1;
+            CREATE SEQUENCE IF NOT EXISTS seq_supervision_logs START 1;
         """)
 
         db.execute("""
@@ -362,7 +365,7 @@ def init_db(app):
                 CHECK (alert_type IN (
                     'score_diff', 'timeout', 'difficulty_cluster',
                     'unfinalized_after_audit', 'backlog', 'review_appeal',
-                    'return_reeval'
+                    'return_reeval', 'task_supervision'
                 )),
                 CHECK (alert_level IN ('info', 'warning', 'critical'))
             );
@@ -430,6 +433,112 @@ def init_db(app):
                 CHECK (status IN ('pending', 'reevaluating', 'reevaluated', 'closed'))
             );
         """)
+
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS task_supervisions (
+                id INTEGER PRIMARY KEY DEFAULT nextval('seq_task_supervisions'),
+                supervision_code VARCHAR(50) UNIQUE NOT NULL,
+                task_id INTEGER NOT NULL,
+                paper_id INTEGER NOT NULL,
+                supervisor_id INTEGER NOT NULL,
+                supervisee_id INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                urgency_level VARCHAR(20) NOT NULL DEFAULT 'normal',
+                requirements TEXT,
+                expected_complete_at TIMESTAMP,
+                status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                feedback TEXT,
+                feedback_at TIMESTAMP,
+                completed_at TIMESTAMP,
+                closed_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                CHECK (urgency_level IN ('normal', 'urgent', 'critical')),
+                CHECK (status IN ('pending', 'acknowledged', 'processing', 'completed', 'overdue', 'closed'))
+            );
+        """)
+
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS task_reassignments (
+                id INTEGER PRIMARY KEY DEFAULT nextval('seq_task_reassignments'),
+                supervision_id INTEGER,
+                task_id INTEGER NOT NULL,
+                paper_id INTEGER NOT NULL,
+                from_user_id INTEGER NOT NULL,
+                to_user_id INTEGER NOT NULL,
+                reason TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS supervision_logs (
+                id INTEGER PRIMARY KEY DEFAULT nextval('seq_supervision_logs'),
+                supervision_id INTEGER NOT NULL,
+                operator_id INTEGER,
+                action VARCHAR(30) NOT NULL,
+                remark TEXT,
+                from_status VARCHAR(20),
+                to_status VARCHAR(20),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+        try:
+            db.execute("ALTER TABLE alerts ADD COLUMN supervision_id INTEGER")
+        except Exception:
+            pass
+
+        try:
+            constraint_check = db.execute("""
+                SELECT constraint_text FROM duckdb_constraints()
+                WHERE table_name = 'alerts' AND constraint_type = 'CHECK'
+                AND constraint_column_names = ['alert_type']
+            """).fetchval()
+            if constraint_check and 'task_supervision' not in str(constraint_check):
+                db.execute("ALTER TABLE alerts DROP CONSTRAINT")
+                db.execute("""
+                    ALTER TABLE alerts ADD CONSTRAINT alert_type_check
+                    CHECK (alert_type IN (
+                        'score_diff', 'timeout', 'difficulty_cluster',
+                        'unfinalized_after_audit', 'backlog', 'review_appeal',
+                        'return_reeval', 'task_supervision'
+                    ))
+                """)
+        except Exception:
+            try:
+                db.execute("""
+                    CREATE TABLE IF NOT EXISTS alerts_new (
+                        id INTEGER PRIMARY KEY DEFAULT nextval('seq_alerts'),
+                        alert_type VARCHAR(50) NOT NULL,
+                        alert_level VARCHAR(20) DEFAULT 'warning',
+                        paper_id INTEGER,
+                        task_id INTEGER,
+                        question_group_id INTEGER,
+                        group_id INTEGER,
+                        supervision_id INTEGER,
+                        message TEXT,
+                        detail_json TEXT,
+                        is_handled BOOLEAN DEFAULT false,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        handled_at TIMESTAMP,
+                        CHECK (alert_type IN (
+                            'score_diff', 'timeout', 'difficulty_cluster',
+                            'unfinalized_after_audit', 'backlog', 'review_appeal',
+                            'return_reeval', 'task_supervision'
+                        )),
+                        CHECK (alert_level IN ('info', 'warning', 'critical'))
+                    )
+                """)
+                db.execute("""
+                    INSERT INTO alerts_new SELECT id, alert_type, alert_level, paper_id, task_id,
+                        question_group_id, group_id, supervision_id, message, detail_json,
+                        is_handled, created_at, handled_at FROM alerts
+                """)
+                db.execute("DROP TABLE alerts")
+                db.execute("ALTER TABLE alerts_new RENAME TO alerts")
+            except Exception:
+                pass
 
         # TODO: DuckDB 0.10.0 索引bug，暂时禁用所有索引
         # db.execute("""

@@ -304,6 +304,21 @@ APPEAL_PRIORITY_MAP = {
     'low': '低'
 }
 
+SUPERVISION_STATUS_MAP = {
+    'pending': '待确认',
+    'acknowledged': '已确认',
+    'processing': '处理中',
+    'completed': '已完成',
+    'overdue': '已逾期',
+    'closed': '已关闭'
+}
+
+SUPERVISION_URGENCY_MAP = {
+    'normal': '普通',
+    'urgent': '紧急',
+    'critical': '特急'
+}
+
 
 def generate_appeal_code():
     from datetime import datetime
@@ -351,3 +366,57 @@ def get_paper_current_round(db, paper_id):
         [paper_id]
     ).fetchval()
     return result or 1
+
+
+def generate_supervision_code():
+    from datetime import datetime
+    ts = datetime.now().strftime('%Y%m%d%H%M%S%f')
+    return f"SV{ts}"
+
+
+def add_supervision_log(db, supervision_id, operator_id, action, remark="", from_status=None, to_status=None):
+    db.execute("""
+        INSERT INTO supervision_logs (supervision_id, operator_id, action, remark, from_status, to_status)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, [supervision_id, operator_id, action, remark, from_status, to_status])
+
+
+def get_task_supervision_info(db, task_id):
+    rows = db.execute("""
+        SELECT ts.*, u.real_name as supervisor_name, u.username as supervisor_username,
+               s.real_name as supervisee_name, s.username as supervisee_username
+        FROM task_supervisions ts
+        LEFT JOIN users u ON ts.supervisor_id = u.id
+        LEFT JOIN users s ON ts.supervisee_id = s.id
+        WHERE ts.task_id = ? AND ts.status NOT IN ('closed')
+        ORDER BY ts.id DESC
+    """, [task_id]).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d['status_name'] = SUPERVISION_STATUS_MAP.get(d['status'], d['status'])
+        d['urgency_level_name'] = SUPERVISION_URGENCY_MAP.get(d['urgency_level'], d['urgency_level'])
+        result.append(d)
+    return result
+
+
+def get_paper_supervision_info(db, paper_id):
+    rows = db.execute("""
+        SELECT ts.*, t.task_code, t.task_type, t.status as task_status,
+               u.real_name as supervisor_name, u.username as supervisor_username,
+               s.real_name as supervisee_name, s.username as supervisee_username
+        FROM task_supervisions ts
+        LEFT JOIN tasks t ON ts.task_id = t.id
+        LEFT JOIN users u ON ts.supervisor_id = u.id
+        LEFT JOIN users s ON ts.supervisee_id = s.id
+        WHERE ts.paper_id = ?
+        ORDER BY ts.created_at ASC
+    """, [paper_id]).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d['status_name'] = SUPERVISION_STATUS_MAP.get(d['status'], d['status'])
+        d['urgency_level_name'] = SUPERVISION_URGENCY_MAP.get(d['urgency_level'], d['urgency_level'])
+        d['task_status_name'] = STATUS_MAP.get(d['task_status'], d['task_status']) if d.get('task_status') else None
+        result.append(d)
+    return result

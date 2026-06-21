@@ -7,7 +7,8 @@ from app.utils import (
     get_paper_return_count, get_paper_current_round,
     ensure_single_active_task, update_paper_status, calculate_deadline,
     generate_task_code, detect_anomalies,
-    STATUS_MAP, ROLE_MAP, RETURN_REASON_TYPE_MAP, RETURN_STATUS_MAP
+    STATUS_MAP, ROLE_MAP, RETURN_REASON_TYPE_MAP, RETURN_STATUS_MAP,
+    SUPERVISION_STATUS_MAP, SUPERVISION_URGENCY_MAP
 )
 from config import Config
 
@@ -404,6 +405,55 @@ def paper_timeline(paper_id):
             'reevaluated_at': str(rr['reevaluated_at']) if rr['reevaluated_at'] else None,
             'closed_at': str(rr['closed_at']) if rr['closed_at'] else None,
         })
+
+    supervisions = db.execute("""
+        SELECT ts.*, u.real_name as supervisor_name, u.username as supervisor_username,
+               s.real_name as supervisee_name, s.username as supervisee_username,
+               t.task_code, t.task_type
+        FROM task_supervisions ts
+        LEFT JOIN users u ON ts.supervisor_id = u.id
+        LEFT JOIN users s ON ts.supervisee_id = s.id
+        LEFT JOIN tasks t ON ts.task_id = t.id
+        WHERE ts.paper_id = ?
+        ORDER BY ts.created_at ASC
+    """, [paper_id]).fetchall()
+
+    for sv in supervisions:
+        reassignments = db.execute("""
+            SELECT tr.*, u1.real_name as from_user_name, u2.real_name as to_user_name
+            FROM task_reassignments tr
+            LEFT JOIN users u1 ON tr.from_user_id = u1.id
+            LEFT JOIN users u2 ON tr.to_user_id = u2.id
+            WHERE tr.supervision_id = ?
+            ORDER BY tr.id ASC
+        """, [sv['id']]).fetchall()
+
+        event = {
+            'event_type': 'supervision',
+            'event_type_name': '督办',
+            'supervision_code': sv['supervision_code'],
+            'reason': sv['reason'],
+            'urgency_level': sv['urgency_level'],
+            'urgency_level_name': SUPERVISION_URGENCY_MAP.get(sv['urgency_level'], sv['urgency_level']),
+            'requirements': sv['requirements'],
+            'supervisor_name': sv['supervisor_name'],
+            'supervisee_name': sv['supervisee_name'],
+            'status': sv['status'],
+            'status_name': SUPERVISION_STATUS_MAP.get(sv['status'], sv['status']),
+            'task_code': sv['task_code'],
+            'task_type': sv['task_type'],
+            'feedback': sv['feedback'],
+            'created_at': str(sv['created_at']) if sv['created_at'] else None,
+            'expected_complete_at': str(sv['expected_complete_at']) if sv['expected_complete_at'] else None,
+            'completed_at': str(sv['completed_at']) if sv['completed_at'] else None,
+            'reassignments': [{
+                'from_user_name': ra['from_user_name'],
+                'to_user_name': ra['to_user_name'],
+                'reason': ra['reason'],
+                'created_at': str(ra['created_at']) if ra['created_at'] else None,
+            } for ra in reassignments],
+        }
+        timeline.append(event)
 
     timeline.sort(key=lambda x: x.get('created_at') or '', reverse=False)
 

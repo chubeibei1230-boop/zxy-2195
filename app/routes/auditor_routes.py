@@ -6,7 +6,8 @@ from app.utils import (
     role_required, get_current_user, row_to_dict, rows_to_list,
     ensure_single_active_task, update_paper_status, check_score_diff,
     STATUS_MAP, detect_anomalies, APPEAL_STATUS_MAP, APPEAL_TYPE_MAP,
-    RETURN_REASON_TYPE_MAP, RETURN_STATUS_MAP
+    RETURN_REASON_TYPE_MAP, RETURN_STATUS_MAP,
+    SUPERVISION_STATUS_MAP, SUPERVISION_URGENCY_MAP, get_task_supervision_info
 )
 
 auditor_bp = Blueprint('auditor', __name__, url_prefix='/api/auditor')
@@ -34,9 +35,19 @@ def dashboard():
           AND t.created_at >= CURRENT_DATE - INTERVAL 30 DAY
     """, [uid, uid]).fetchone()
 
+    supervision_stats = db.execute("""
+        SELECT
+            COUNT(*) as pending_supervisions,
+            COALESCE(SUM(CASE WHEN urgency_level = 'critical' THEN 1 ELSE 0 END), 0) as critical_count,
+            COALESCE(SUM(CASE WHEN urgency_level = 'urgent' THEN 1 ELSE 0 END), 0) as urgent_count
+        FROM task_supervisions
+        WHERE supervisee_id = ? AND status IN ('pending', 'acknowledged', 'processing', 'overdue')
+    """, [uid]).fetchone()
+
     return jsonify({
         "user": user,
-        "stats": dict(stats)
+        "stats": dict(stats),
+        "supervision_stats": dict(supervision_stats)
     }), 200
 
 
@@ -120,6 +131,8 @@ def list_tasks():
         """, [d['id']]).fetchone()
         if audit_review:
             d['audit_review'] = dict(audit_review)
+
+        d['supervisions'] = get_task_supervision_info(db, d['id'])
 
         result.append(d)
 
